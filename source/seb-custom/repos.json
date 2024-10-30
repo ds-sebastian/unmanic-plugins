@@ -1,0 +1,31 @@
+{
+    "repo": {
+        "id": "repository.seb_custom",
+        "name": "Sebs Private Unmanic Repo",
+        "icon": "",
+        "repo_data_directory": "https://raw.githubusercontent.com/ds-sebastian/unmanic-plugins/repo/",
+        "repo_data_url": "https://raw.githubusercontent.com/ds-sebastian/unmanic-plugins/repo/repo.json"
+    },
+    "plugins": [
+        {
+            "author": "yajrendrag",
+            "compatibility": [
+                1,
+                2
+            ],
+            "description": "Detect each audio stream language and tag stream with results",
+            "icon": "https://raw.githubusercontent.com/ds-sebastian/unmanic-plugins/master/source/seb-custom/icon.png",
+            "id": "seb-custom",
+            "name": "Seb Custom Audio Processor (for Videos)",
+            "platform": [
+                "all"
+            ],
+            "priorities": {
+                "on_library_management_file_test": 99,
+                "on_worker_process": 1
+            },
+            "tags": "audio,ffmpeg,library file test",
+            "version": "0.0.6"
+        }
+    ]
+}
