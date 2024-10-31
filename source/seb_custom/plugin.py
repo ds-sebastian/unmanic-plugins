@@ -24,7 +24,7 @@ import logging
 import os
 from typing import Dict, List
 
-from lib.ffmpeg import Parser, Probe, StreamMapper
+from seb_custom.lib.ffmpeg import Parser, Probe, StreamMapper
 from unmanic.libs.directoryinfo import UnmanicDirectoryInfo
 from unmanic.libs.unplugins.settings import PluginSettings
 
