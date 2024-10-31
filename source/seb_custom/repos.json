@@ -3,8 +3,8 @@
         "id": "repository.seb_custom",
         "name": "Sebs Private Unmanic Repo",
         "icon": "",
-        "repo_data_directory": "https://raw.githubusercontent.com/ds-sebastian/unmanic-plugins/repo/",
-        "repo_data_url": "https://raw.githubusercontent.com/ds-sebastian/unmanic-plugins/repo/repo.json"
+        "repo_data_directory": "https://raw.githubusercontent.com/ds-sebastian/unmanic-plugins/master/source/",
+        "repo_data_url": "https://raw.githubusercontent.com/ds-sebastian/unmanic-plugins/master/repo.json"
     },
     "plugins": [
         {

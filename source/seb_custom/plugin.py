@@ -24,11 +24,11 @@ Copyright:
 
 import logging
 
-from audio_processor.lib.ffmpeg import Parser, Probe, StreamMapper
+from lib.ffmpeg import Parser, Probe, StreamMapper
 from unmanic.libs.unplugins.settings import PluginSettings
 
 # Configure plugin logger
-logger = logging.getLogger("Unmanic.Plugin.audio_processor")
+logger = logging.getLogger("Unmanic.Plugin.seb_custom")
 
 
 class Settings(PluginSettings):
