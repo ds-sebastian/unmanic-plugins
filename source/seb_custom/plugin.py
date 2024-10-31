@@ -681,72 +681,71 @@ def on_library_management_file_test(data):
 def on_worker_process(data):
     """
     Runner function - enables additional configured processing jobs during the worker stages of a task.
-    """
-    # Default to no FFMPEG command required
-    data["exec_command"] = []
-    data["repeat"] = False
 
+    The 'data' object argument includes:
+        worker_log              - Array, the log lines that are being tailed by the frontend. Can be left empty.
+        library_id             - Number, the library that the current task is associated with.
+        exec_command           - Array, a subprocess command that Unmanic should execute. Can be empty.
+        command_progress_parser - Function, a function that Unmanic can use to parse the STDOUT of the command to collect progress stats. Can be empty.
+        file_in               - String, the source file to be processed by the command.
+        file_out              - String, the destination that the command should output (may be the same as the file_in if necessary).
+        original_file_path    - String, the absolute path to the original file.
+        repeat               - Boolean, should this runner be executed again once completed with the same variables.
+    """
     # Get the path to the file
     abspath = data.get("file_in")
+
+    # Configure settings object
+    settings = Settings(library_id=data.get("library_id"))
 
     # Get file probe
     probe = Probe(logger, allowed_mimetypes=["video"])
     if not probe.file(abspath):
         # File probe failed, skip the rest of this test
+        logger.debug(f"Failed to probe file '{abspath}'")
         return data
-
-    # Configure settings object
-    settings = Settings(library_id=data.get("library_id"))
 
     # Get stream mapper
     mapper = PluginStreamMapper()
     mapper.set_settings(settings)
     mapper.set_probe(probe)
 
-    # Analyze streams
-    probe_streams = probe.get_probe()["streams"]
-    mapper.analyze_streams(probe_streams)
+    try:
+        # Analyze all streams
+        probe_streams = probe.get_probe()["streams"]
+        mapper.analyze_streams(probe_streams)
 
-    if mapper.streams_need_processing():
-        # Set the input file
-        mapper.set_input_file(abspath)
+        # Check if any streams need processing
+        if mapper.streams_need_processing():
+            # Set input/output files
+            mapper.set_input_file(data.get("file_in"))
+            mapper.set_output_file(data.get("file_out"))
 
-        # Set the output file
-        mapper.set_output_file(data.get("file_out"))
+            # Get the FFmpeg args
+            ffmpeg_args = mapper.get_ffmpeg_args()
 
-        # Get generated ffmpeg args
-        ffmpeg_args = mapper.get_ffmpeg_args()
+            if ffmpeg_args:
+                # Set the execution command
+                data["exec_command"] = ["ffmpeg"]
+                data["exec_command"].extend(ffmpeg_args)
 
-        # Add container options
-        ffmpeg_args += [
-            # Copy video streams
-            "-map",
-            "0:v?",
-            "-c:v",
-            "copy",
-            # Copy subtitle streams
-            "-map",
-            "0:s?",
-            "-c:s",
-            "copy",
-            # Copy chapters
-            "-map_chapters",
-            "0",
-            # Set max muxing queue size
-            "-max_muxing_queue_size",
-            str(settings.get_setting("max_muxing_queue_size")),
-        ]
+                # Set up the parser
+                data["command_progress_parser"] = Parser(logger)
 
-        # Apply ffmpeg args to command
-        data["exec_command"] = ["ffmpeg"]
-        data["exec_command"] += ffmpeg_args
+                logger.debug(
+                    "FFmpeg command generated: {}".format(
+                        " ".join(data["exec_command"])
+                    )
+                )
+            else:
+                logger.debug("No FFmpeg command required")
+        else:
+            logger.debug("No streams need processing")
 
-        # Set the parser
-        parser = Parser(logger)
-        parser.set_probe(probe)
-        data["command_progress_parser"] = parser.parse_progress
-
-        logger.debug("FFmpeg command: {}".format(" ".join(data["exec_command"])))
+    except Exception as e:
+        logger.error(f"Error during worker processing: {str(e)}")
+        # Don't process if we encounter an error
+        return data
 
     return data
 
