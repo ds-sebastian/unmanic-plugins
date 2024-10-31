@@ -33,33 +33,30 @@ logger = logging.getLogger("Unmanic.Plugin.seb_custom")
 
 
 class Settings(PluginSettings):
-    """Plugin settings and UI configuration"""
-
     settings = {
         # General processing options
-        "keep_original_streams": True,  # Always keep originals for compatibility and quality
-        "force_processing": False,  # No need to force by default
-        # Sample rate handling - your TV's limit
-        "target_sample_rate": 48000,  # 48kHz max for TV compatibility
-        # Audio encoding - matches flow requirements
-        "stereo_encoder": "libfdk_aac",  # Better quality for stereo
-        "multichannel_71_encoder": "opus",  # Required for >6 channels
-        "multichannel_51_encoder": "libfdk_aac",  # Better quality for 5.1
-        # Stereo downmix - always create for compatibility
+        "keep_original_streams": True,
+        "force_processing": False,
+        # Sample rate handling
+        "target_sample_rate": 48000,  # Only convert if higher than this
+        # Audio encoding - used only when re-encoding is necessary
+        "stereo_encoder": "libfdk_aac",
+        "multichannel_71_encoder": "opus",  # For preserving >6 channels
+        "multichannel_51_encoder": "libfdk_aac",
+        # Stereo downmix
         "create_stereo_tracks": True,
         "stereo_track_suffix": "AAC Stereo",
-        # Loudness normalization - exact values from flow
+        # Loudness normalization - only applied when:
+        # 1. Stream is ≤6 channels and not Atmos (can normalize without re-encoding)
+        # 2. Stream needs re-encoding anyway due to sample rate
         "enable_loudnorm": True,
-        "surround_norm_i": "-24.0",  # Surround target LUFS
-        "surround_norm_lra": "7.0",  # Surround loudness range
-        "surround_norm_tp": "-2.0",  # Surround true peak
-        "stereo_norm_i": "-16.0",  # Stereo target LUFS (streaming standard)
-        "stereo_norm_lra": "11.0",  # Stereo loudness range
-        "stereo_norm_tp": "-1.0",  # Stereo true peak
-        # Bitrate calculations handled in code (64k per channel)
-        # Stream ordering handled in code (main first, stereo second)
-        # Advanced
-        "max_muxing_queue_size": 2048,  # Safe default for complex audio
+        "preserve_quality": True,  # New setting to control normalization behavior
+        "surround_norm_i": "-24.0",
+        "surround_norm_lra": "7.0",
+        "surround_norm_tp": "-2.0",
+        "stereo_norm_i": "-16.0",
+        "stereo_norm_lra": "11.0",
+        "stereo_norm_tp": "-1.0",
     }
 
     def __init__(self, *args, **kwargs):
@@ -180,30 +177,182 @@ class PluginStreamMapper(StreamMapper):
         self.streams_by_language: Dict[str, List[AudioStreamInfo]] = {}
         self.stereo_streams_by_language: Dict[str, AudioStreamInfo] = {}
 
+    def log_stream_info(self, analysis: AudioStreamInfo, prefix: str = "") -> None:
+        """Helper to consistently log stream information"""
+        logger.info(f"""{prefix}
+    Stream Analysis:
+        Index: {analysis.stream_index}
+        Codec: {analysis.codec_name}
+        Channels: {analysis.channels} ({self._get_channel_layout(analysis.channels)})
+        Sample Rate: {analysis.sample_rate} Hz
+        Language: {analysis.language}
+        Title: {analysis.title or 'None'}
+        Is Commentary: {self._is_commentary(analysis)}
+        Is Atmos/TrueHD: {analysis.is_atmos}
+        Bitrate: {analysis.bit_rate/1000:.1f}k per channel
+    """)
+
+    def _get_channel_layout(self, channels: int) -> str:
+        """Convert channel count to human-readable layout"""
+        layouts = {
+            1: "Mono",
+            2: "Stereo",
+            6: "5.1",
+            8: "7.1",
+        }
+        return layouts.get(channels, f"{channels} channels")
+
+    def _is_commentary(self, analysis: AudioStreamInfo) -> bool:
+        """Detect if stream is likely a commentary track"""
+        if not analysis.title:
+            return False
+        commentary_indicators = ["commentary", "comment", "director", "cast"]
+        return any(
+            indicator in analysis.title.lower() for indicator in commentary_indicators
+        )
+
+    def _handle_commentary_track(self, analysis: AudioStreamInfo, stream_id: int):
+        """Special handling for commentary tracks"""
+        logger.info("Applying commentary track optimizations")
+
+        # Use simpler normalization settings for commentary
+        commentary_norm = "loudnorm=I=-16:LRA=11:TP=-1:measured_I=-16:measured_LRA=11:measured_TP=-1:measured_thresh=-25:offset=0.5"
+
+        return {
+            "stream_mapping": ["-map", f"0:a:{stream_id}"],
+            "stream_encoding": [
+                f"-c:a:{stream_id}",
+                "copy",
+                f"-filter:a:{stream_id}",
+                commentary_norm,
+            ],
+        }
+
+    def _handle_atmos_track(
+        self,
+        analysis: AudioStreamInfo,
+        stream_id: int,
+        needs_sample_rate_conversion: bool,
+    ):
+        """Special handling for Atmos/TrueHD content"""
+        if needs_sample_rate_conversion:
+            logger.warning(
+                "Atmos content needs sample rate conversion - will lose Atmos metadata"
+            )
+            # Convert to high-quality multichannel
+            return self._create_multichannel_mapping(analysis, stream_id)
+        else:
+            logger.info("Preserving Atmos content (no conversion needed)")
+            return {
+                "stream_mapping": ["-map", f"0:a:{stream_id}"],
+                "stream_encoding": [f"-c:a:{stream_id}", "copy"],
+            }
+
+    def _create_stereo_downmix(self, analysis: AudioStreamInfo, stream_id: int):
+        """Create stereo downmix mapping"""
+        next_stream_id = len(self.streams_by_language)
+        stereo_encoder = self.settings.get_setting("stereo_encoder")
+        stereo_bitrate = self.calculate_bitrate(analysis, target_channels=2)
+
+        logger.info(f"""
+    Creating stereo downmix:
+        Original: {analysis.channels} channels
+        Encoder: {stereo_encoder}
+        Bitrate: {stereo_bitrate}k
+        Stream ID: {next_stream_id}
+    """)
+
+        return {
+            "stream_mapping": ["-map", f"0:a:{stream_id}"],
+            "stream_encoding": [
+                f"-c:a:{next_stream_id}",
+                stereo_encoder,
+                f"-ac:a:{next_stream_id}",
+                "2",
+                f"-ar:a:{next_stream_id}",
+                str(self.settings.get_setting("target_sample_rate")),
+                f"-b:a:{next_stream_id}",
+                f"{stereo_bitrate}k",
+                f"-filter:a:{next_stream_id}",
+                self.get_loudnorm_filter(is_stereo=True),
+                f"-metadata:s:a:{next_stream_id}",
+                f'title={f"{analysis.title} " if analysis.title else ""}{self.settings.get_setting("stereo_track_suffix")}',
+            ],
+        }
+
+    def _create_multichannel_mapping(self, analysis: AudioStreamInfo, stream_id: int):
+        """Convert multichannel to appropriate format"""
+        encoder = self.get_encoder_for_stream(analysis)
+        bitrate = self.calculate_bitrate(analysis)
+
+        logger.info(f"""
+    Converting multichannel stream:
+        Channels: {analysis.channels}
+        Encoder: {encoder}
+        Bitrate: {bitrate}k
+        Sample Rate: {self.settings.get_setting('target_sample_rate')}
+    """)
+
+        return {
+            "stream_mapping": ["-map", f"0:a:{stream_id}"],
+            "stream_encoding": [
+                f"-c:a:{stream_id}",
+                encoder,
+                f"-ar:a:{stream_id}",
+                str(self.settings.get_setting("target_sample_rate")),
+                f"-b:a:{stream_id}",
+                f"{bitrate}k",
+                # Apply normalization if possible and enabled
+                *(
+                    [
+                        f"-filter:a:{stream_id}",
+                        self.get_loudnorm_filter(
+                            is_stereo=False, channels=analysis.channels
+                        ),
+                    ]
+                    if self.settings.get_setting("enable_loudnorm")
+                    and analysis.channels <= 6
+                    else []
+                ),
+            ],
+        }
+
     def set_settings(self, settings: Settings) -> None:
         """Set plugin settings"""
         self.settings = settings
 
     def analyze_streams(self, probe_streams: List[dict]) -> None:
         """Analyze all audio streams and categorize them"""
-        logger.debug("Beginning analysis of audio streams...")
+        logger.info("Beginning comprehensive audio stream analysis...")
+
+        # Track statistics for logging
+        stats = {
+            "total_streams": 0,
+            "high_samplerate_streams": 0,
+            "multichannel_streams": 0,
+            "commentary_tracks": 0,
+            "atmos_tracks": 0,
+        }
 
         for stream in probe_streams:
             if stream.get("codec_type") != "audio":
                 continue
 
+            stats["total_streams"] += 1
             stream_info = AudioStreamInfo(stream)
-            logger.info(f"""
-    Found audio stream:
-        Index: {stream_info.stream_index}
-        Codec: {stream_info.codec_name}
-        Channels: {stream_info.channels}
-        Sample Rate: {stream_info.sample_rate}
-        Language: {stream_info.language}
-        Bitrate: {stream_info.bit_rate}
-        Is Atmos: {stream_info.is_atmos}
-        Title: {stream_info.title or 'None'}
-    """)
+            self.log_stream_info(
+                stream_info, prefix=f"\nAnalyzing Stream {stream_info.stream_index}"
+            )
+
+            # Collect statistics
+            if stream_info.sample_rate > 48000:
+                stats["high_samplerate_streams"] += 1
+            if stream_info.channels > 2:
+                stats["multichannel_streams"] += 1
+            if self._is_commentary(stream_info):
+                stats["commentary_tracks"] += 1
+            if stream_info.is_atmos:
+                stats["atmos_tracks"] += 1
 
             # Track streams by language
             if stream_info.language not in self.streams_by_language:
@@ -213,60 +362,121 @@ class PluginStreamMapper(StreamMapper):
 
             # Track existing stereo streams
             if stream_info.channels == 2:
+                if stream_info.language in self.stereo_streams_by_language:
+                    logger.warning(
+                        f"Multiple stereo streams found for language: {stream_info.language}"
+                    )
                 self.stereo_streams_by_language[stream_info.language] = stream_info
-                logger.debug(
-                    f"Found existing stereo stream for language: {stream_info.language}"
-                )
 
-        logger.debug(f"Found {len(probe_streams)} total streams")
-        logger.debug(f"Found {len(self.streams_by_language)} language(s)")
-        logger.debug(
-            f"Found {len(self.stereo_streams_by_language)} existing stereo stream(s)"
-        )
+        # Log analysis summary
+        logger.info(f"""
+    Stream Analysis Summary:
+        Total Audio Streams: {stats['total_streams']}
+        Languages Found: {list(self.streams_by_language.keys())}
+        High Sample Rate (>48kHz) Streams: {stats['high_samplerate_streams']}
+        Multichannel Streams: {stats['multichannel_streams']}
+        Commentary Tracks: {stats['commentary_tracks']}
+        Atmos/TrueHD Tracks: {stats['atmos_tracks']}
+        Existing Stereo Streams: {len(self.stereo_streams_by_language)}
+    """)
 
     def test_stream_needs_processing(self, stream_info: dict) -> bool:
         """Determine if stream needs processing"""
         analysis = AudioStreamInfo(stream_info)
 
         logger.debug(f"""
-    Testing stream for processing:
+    Processing decision for stream:
         Index: {analysis.stream_index}
         Codec: {analysis.codec_name}
         Channels: {analysis.channels}
         Sample Rate: {analysis.sample_rate}
+        Is Atmos/TrueHD: {analysis.is_atmos}
         Language: {analysis.language}
     """)
 
-        # Always process if force enabled
-        if self.settings.get_setting("force_processing"):
-            logger.info("Stream needs processing: Force processing enabled")
-            return True
-
-        # Always process for normalization if enabled
-        if self.settings.get_setting("enable_loudnorm"):
-            logger.info("Stream needs processing: Loudness normalization enabled")
-            return True
-
-        # Process if sample rate needs conversion
+        # Critical compatibility check first - always convert if sample rate too high
         if analysis.sample_rate > self.settings.get_setting("target_sample_rate"):
             logger.info(
-                f"Stream needs processing: Sample rate {analysis.sample_rate} exceeds target {self.settings.get_setting('target_sample_rate')}"
+                f"Must process: Sample rate {analysis.sample_rate} exceeds device maximum {self.settings.get_setting('target_sample_rate')}Hz"
             )
             return True
 
-        # Process if we need to create stereo version
+        # Force processing override
+        if self.settings.get_setting("force_processing"):
+            logger.info("Processing: Force processing enabled")
+            return True
+
+        # Normalize only if we can do it without re-encoding and quality preservation is off
+        if (
+            self.settings.get_setting("enable_loudnorm")
+            and not self.settings.get_setting("preserve_quality")
+            and analysis.channels <= 6
+            and not analysis.is_atmos
+        ):
+            logger.info("Processing: Applying normalization to compatible stream")
+            return True
+
+        # Create stereo downmix if needed
         if (
             analysis.channels > 2
             and self.settings.get_setting("create_stereo_tracks")
             and analysis.language not in self.stereo_streams_by_language
         ):
             logger.info(
-                f"Stream needs processing: Need to create stereo version for language {analysis.language}"
+                f"Processing: Need stereo version for language {analysis.language}"
             )
             return True
 
-        logger.debug("Stream does not need processing")
+        # Log why we're preserving the stream as-is
+        if analysis.is_atmos:
+            logger.info("Preserving Atmos/TrueHD stream without modification")
+        elif analysis.channels > 6:
+            logger.info(f"Preserving {analysis.channels} channel stream (>6 channels)")
+        elif self.settings.get_setting("preserve_quality"):
+            logger.info("Preserving original quality (normalization skipped)")
+
         return False
+
+    def custom_stream_mapping(self, stream_info: dict, stream_id: int):
+        """Bridge between StreamMapper and our build_stream_mapping"""
+        logger.debug(f"Generating mapping for stream {stream_id}")
+        mapping = self.build_stream_mapping(stream_info, stream_id)
+
+        # Log the mapping that will be used
+        logger.debug(f"""
+    Stream mapping for stream {stream_id}:
+        Mapping args: {' '.join(mapping['stream_mapping'])}
+        Encoding args: {' '.join(mapping['stream_encoding'])}
+    """)
+
+        return mapping
+
+    def get_ffmpeg_args(self) -> List[str]:
+        """Override parent's get_ffmpeg_args to ensure proper stream order"""
+        # Start with input args
+        output_args = []
+
+        # Process all streams in order
+        if self.streams_to_map:
+            logger.debug(f"Processing {len(self.streams_to_map)} streams")
+            for stream_id in self.streams_to_map:
+                stream_info = self.probe.get_stream_info(stream_id)
+                mapping = self.custom_stream_mapping(stream_info, stream_id)
+
+                if mapping.get("stream_mapping"):
+                    output_args.extend(mapping["stream_mapping"])
+                if mapping.get("stream_encoding"):
+                    output_args.extend(mapping["stream_encoding"])
+
+        # Add all default args
+        args = []
+        args.extend(self.main_options)
+        args.extend(self.input_file)
+        args.extend(self.advanced_options)
+        args.extend(output_args)
+        args.extend(["-y", self.output_file])
+
+        return args
 
     def get_encoder_for_stream(self, stream_info: AudioStreamInfo) -> str:
         """Get appropriate encoder based on stream properties"""
@@ -291,56 +501,74 @@ class PluginStreamMapper(StreamMapper):
             # Fallback to 64k per channel
             return 64000 * target_channels
 
-    def get_loudnorm_filter(self, is_stereo: bool = False) -> str:
+    def get_loudnorm_filter(self, is_stereo: bool = False, channels: int = 2) -> str:
         """Get loudnorm filter string based on channel count"""
         if not self.settings.get_setting("enable_loudnorm"):
             return None
 
+        # Check if we can apply normalization
+        if channels > 6:
+            logger.warning(
+                f"Cannot apply normalization to {channels} channels without re-encoding"
+            )
+            return None
+
         if is_stereo:
-            return (
+            filter_string = (
                 f"loudnorm=I={self.settings.get_setting('stereo_norm_i')}:"
                 f"LRA={self.settings.get_setting('stereo_norm_lra')}:"
                 f"TP={self.settings.get_setting('stereo_norm_tp')}"
             )
+            logger.debug(f"Using stereo normalization: {filter_string}")
+            return filter_string
         else:
-            return (
+            filter_string = (
                 f"loudnorm=I={self.settings.get_setting('surround_norm_i')}:"
                 f"LRA={self.settings.get_setting('surround_norm_lra')}:"
                 f"TP={self.settings.get_setting('surround_norm_tp')}"
             )
+            logger.debug(f"Using surround normalization: {filter_string}")
+            return filter_string
 
     def build_stream_mapping(self, stream_info: dict, stream_id: int):
         """Build FFmpeg mapping for stream processing"""
         analysis = AudioStreamInfo(stream_info)
-        logger.info(f"""
-    Building stream mapping for:
-        Stream ID: {stream_id}
-        Index: {analysis.stream_index}
-        Codec: {analysis.codec_name}
-        Channels: {analysis.channels}
-        Sample Rate: {analysis.sample_rate}
-        Language: {analysis.language}
-    """)
 
         stream_mapping = []
         stream_encoding = []
 
-        # Map original/main stream
+        # Map original stream
         stream_mapping.extend(["-map", f"0:a:{stream_id}"])
-        logger.debug(f"Mapped original stream: 0:a:{stream_id}")
 
-        # Handle main stream processing
-        needs_conversion = analysis.sample_rate > self.settings.get_setting(
+        needs_sample_rate_conversion = analysis.sample_rate > self.settings.get_setting(
             "target_sample_rate"
         )
-        if needs_conversion:
-            # Choose encoder based on channel count
+        can_normalize_without_reencoding = (
+            analysis.channels <= 6
+            and not analysis.is_atmos
+            and not self.settings.get_setting("preserve_quality")
+        )
+
+        logger.debug(f"""
+    Stream processing plan:
+        Sample rate conversion needed: {needs_sample_rate_conversion}
+        Can normalize without re-encoding: {can_normalize_without_reencoding}
+        Is Atmos/TrueHD: {analysis.is_atmos}
+        Channels: {analysis.channels}
+    """)
+
+        if needs_sample_rate_conversion:
+            # Must re-encode - use best quality options
             if analysis.channels > 6:
-                encoder = self.settings.get_setting("multichannel_71_encoder")
-                logger.info(f"Using 7.1 encoder: {encoder}")
+                encoder = self.settings.get_setting("multichannel_71_encoder")  # OPUS
+                logger.info(
+                    f"Converting to {encoder} to preserve {analysis.channels} channels"
+                )
             else:
-                encoder = self.settings.get_setting("multichannel_51_encoder")
-                logger.info(f"Using 5.1/stereo encoder: {encoder}")
+                encoder = self.settings.get_setting(
+                    "multichannel_51_encoder"
+                )  # libfdk_aac
+                logger.info(f"Converting to {encoder} for best quality")
 
             stream_encoding.extend(
                 [
@@ -350,64 +578,41 @@ class PluginStreamMapper(StreamMapper):
                     str(self.settings.get_setting("target_sample_rate")),
                 ]
             )
-            logger.debug(
-                f"Converting sample rate to: {self.settings.get_setting('target_sample_rate')}"
-            )
+
+            # Apply normalization since we're re-encoding anyway
+            if self.settings.get_setting("enable_loudnorm"):
+                loudnorm = self.get_loudnorm_filter(
+                    is_stereo=analysis.channels <= 2, channels=analysis.channels
+                )
+                if loudnorm:
+                    stream_encoding.extend([f"-filter:a:{stream_id}", loudnorm])
         else:
-            # Copy original codec but still apply normalization
-            stream_encoding.extend([f"-c:a:{stream_id}", "copy"])
-            logger.debug("Copying original stream codec")
+            # Can we normalize without re-encoding?
+            if can_normalize_without_reencoding:
+                stream_encoding.extend(
+                    [
+                        f"-c:a:{stream_id}",
+                        "copy",
+                        f"-filter:a:{stream_id}",
+                        self.get_loudnorm_filter(is_stereo=analysis.channels <= 2),
+                    ]
+                )
+                logger.info("Applying normalization to copied stream")
+            else:
+                # Preserve original quality
+                stream_encoding.extend([f"-c:a:{stream_id}", "copy"])
+                logger.info("Preserving original stream quality")
 
-        # Apply main stream normalization
-        if self.settings.get_setting("enable_loudnorm"):
-            loudnorm = self.get_loudnorm_filter(is_stereo=False)
-            if loudnorm:
-                stream_encoding.extend([f"-filter:a:{stream_id}", loudnorm])
-                logger.debug(f"Applied surround normalization: {loudnorm}")
-
-        # Create stereo version if needed
+        # Handle stereo downmix if needed
         if (
             analysis.channels > 2
             and self.settings.get_setting("create_stereo_tracks")
             and analysis.language not in self.stereo_streams_by_language
         ):
-            next_stream_id = len(self.streams_by_language)
-            stereo_encoder = self.settings.get_setting("stereo_encoder")
-            stereo_bitrate = self.calculate_bitrate(analysis, target_channels=2)
-
-            logger.info(f"""
-    Creating stereo version:
-        Original Stream ID: {stream_id}
-        New Stream ID: {next_stream_id}
-        Encoder: {stereo_encoder}
-        Bitrate: {stereo_bitrate}k
-    """)
-
-            # Map same input stream again
-            stream_mapping.extend(["-map", f"0:a:{stream_id}"])
-            stream_encoding.extend(
-                [
-                    f"-c:a:{next_stream_id}",
-                    stereo_encoder,
-                    f"-ac:a:{next_stream_id}",
-                    "2",
-                    f"-ar:a:{next_stream_id}",
-                    str(self.settings.get_setting("target_sample_rate")),
-                    f"-b:a:{next_stream_id}",
-                    f"{stereo_bitrate}k",
-                    f"-metadata:s:a:{next_stream_id}",
-                    f'title={self.settings.get_setting("stereo_track_suffix")}',
-                ]
-            )
-
-            # Apply stereo normalization
-            stereo_loudnorm = self.get_loudnorm_filter(is_stereo=True)
-            if stereo_loudnorm:
-                stream_encoding.extend([f"-filter:a:{next_stream_id}", stereo_loudnorm])
-                logger.debug(f"Applied stereo normalization: {stereo_loudnorm}")
-
-        logger.debug("Final stream mapping: " + " ".join(stream_mapping))
-        logger.debug("Final stream encoding: " + " ".join(stream_encoding))
+            logger.info("Creating additional stereo version for compatibility")
+            stereo_mapping = self._create_stereo_downmix(analysis, stream_id)
+            stream_mapping.extend(stereo_mapping["stream_mapping"])
+            stream_encoding.extend(stereo_mapping["stream_encoding"])
 
         return {"stream_mapping": stream_mapping, "stream_encoding": stream_encoding}
 
