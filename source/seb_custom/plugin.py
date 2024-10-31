@@ -616,6 +616,20 @@ class PluginStreamMapper(StreamMapper):
 
         return {"stream_mapping": stream_mapping, "stream_encoding": stream_encoding}
 
+    def streams_need_processing(self):
+        """Determine if any streams need processing"""
+        for stream in self.probe.get_probe()["streams"]:
+            if stream["codec_type"] == "audio":
+                logger.debug(f"""
+                Audio stream found:
+                    Codec: {stream.get('codec_name')}
+                    Sample Rate: {stream.get('sample_rate')}
+                    Channels: {stream.get('channels')}
+                    Bit Rate: {stream.get('bit_rate')}
+                """)
+
+        return super().streams_need_processing()
+
 
 def on_library_management_file_test(data):
     """
@@ -624,32 +638,42 @@ def on_library_management_file_test(data):
     # Get the path to the file
     abspath = data.get("path")
 
+    # Configure settings object
+    settings = Settings(library_id=data.get("library_id"))
+
     # Get file probe
     probe = Probe(logger, allowed_mimetypes=["video"])
     if not probe.file(abspath):
         # File probe failed, skip the rest of this test
+        logger.debug(f"Failed to probe file '{abspath}'")
         return data
-
-    # Configure settings object
-    settings = Settings(library_id=data.get("library_id"))
 
     # Get stream mapper
     mapper = PluginStreamMapper()
     mapper.set_settings(settings)
     mapper.set_probe(probe)
 
-    # Analyze all streams
-    probe_streams = probe.get_probe()["streams"]
-    mapper.analyze_streams(probe_streams)
+    try:
+        # Analyze all streams
+        probe_streams = probe.get_probe()["streams"]
+        mapper.analyze_streams(probe_streams)
 
-    # Check if any streams need processing
-    if mapper.streams_need_processing():
-        data["add_file_to_pending_tasks"] = True
-        logger.debug(
-            f"File '{abspath}' should be added to task list - streams require processing"
-        )
-    else:
-        logger.debug(f"File '{abspath}' does not require processing")
+        # Check if any streams need processing
+        needs_processing = mapper.streams_need_processing()
+        logger.debug(f"File '{abspath}' needs processing: {needs_processing}")
+
+        if needs_processing:
+            data["add_file_to_pending_tasks"] = True
+            logger.info(
+                f"File '{abspath}' added to task list - streams require processing"
+            )
+        else:
+            logger.debug(f"File '{abspath}' does not require processing")
+
+    except Exception as e:
+        logger.error(f"Error analyzing file '{abspath}': {str(e)}")
+        # Don't add file if we encounter an error
+        return data
 
     return data
 
