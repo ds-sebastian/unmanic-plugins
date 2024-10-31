@@ -12,8 +12,7 @@
     ],
     "priorities": {
         "on_library_management_file_test": 99,
-        "on_worker_process": 99,
-        "on_postprocessor_task_results": 99
+        "on_worker_process": 0
     },
     "tags": "audio,ffmpeg,normalisation,stereo,conversion",
     "version": "0.0.1"
