@@ -468,32 +468,6 @@ def on_postprocessor_task_results(data):
     return data
 
 
-def build_config_json():
-    """
-    Helper function to generate plugin configuration JSON for Unmanic.
-    This is used to register the plugin with its options in the Unmanic UI.
-    """
-    return {
-        "id": "seb_custom",
-        "name": "Audio Stream Processor",
-        "author": "ds-sebastian",
-        "version": "1.0",
-        "tags": "audio,ffmpeg,normalisation,stereo,conversion",
-        "description": (
-            "Advanced audio stream processor that handles sample rates, multichannel audio, "
-            "stereo downmixing, and loudness normalization while preserving quality and metadata."
-        ),
-        "platform": ["all"],
-        "icon": "",  # Add icon URL if desired
-        "priorities": {
-            "on_library_management_file_test": 99,
-            "on_worker_process": 99,
-            "on_postprocessor_task_results": 99,
-        },
-        "compatibility": [2],  # Compatible with Unmanic plugin handler v2
-    }
-
-
 def test_logger():
     """Helper function to test plugin logging"""
     logger.debug("Audio Processor plugin test debug message")
