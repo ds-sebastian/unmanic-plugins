@@ -610,23 +610,22 @@ class PluginStreamMapper(StreamMapper):
 
         return args
 
-
-def _build_audio_mapping(self, stream_info: dict, stream_id: int):
-    """Helper to build audio stream mapping"""
-    analysis = AudioStreamInfo(stream_info)
-    needs_sample_rate_conversion = analysis.sample_rate > self.settings.get_setting(
-        "target_sample_rate"
-    )
-
-    if not needs_sample_rate_conversion and not self.settings.get_setting(
-        "force_processing"
-    ):
-        logger.debug(
-            f"Stream {stream_id} doesn't need processing, will use default copy"
+    def _build_audio_mapping(self, stream_info: dict, stream_id: int):
+        """Helper to build audio stream mapping"""
+        analysis = AudioStreamInfo(stream_info)
+        needs_sample_rate_conversion = analysis.sample_rate > self.settings.get_setting(
+            "target_sample_rate"
         )
-        return None
 
-    return self.custom_stream_mapping(stream_info, stream_id)
+        if not needs_sample_rate_conversion and not self.settings.get_setting(
+            "force_processing"
+        ):
+            logger.debug(
+                f"Stream {stream_id} doesn't need processing, will use default copy"
+            )
+            return None
+
+        return self.custom_stream_mapping(stream_info, stream_id)
 
     def set_input_file(self, path):
         """Override to ensure input file is stored correctly"""
