@@ -531,12 +531,14 @@ class PluginStreamMapper(StreamMapper):
             }
 
     def get_ffmpeg_args(self) -> List[str]:
-        """Modified to enforce correct stream ordering and prevent duplicates"""
-        # Start with input args
+        """Modified to ensure proper argument handling"""
+        # Start with base command args
         args = []
-        args.extend(self.main_options)
-        args.extend(self.input_file)
-        args.extend(self.advanced_options)
+
+        # Add input file (as a single argument)
+        args.extend(
+            ["-i", self.input_file[0]]
+        )  # self.input_file should be a single path
 
         # Process streams in correct order
         output_args = []
@@ -569,10 +571,6 @@ class PluginStreamMapper(StreamMapper):
             stream_info = self.probe.get_stream_info(stream_id)
             analysis = AudioStreamInfo(stream_info)
 
-            # Only create stereo version if:
-            # 1. Language not already has a stereo version
-            # 2. Original is multichannel
-            # 3. Not already processed this language for stereo
             if (
                 analysis.language not in stereo_languages
                 and analysis.channels > 2
@@ -585,11 +583,35 @@ class PluginStreamMapper(StreamMapper):
 
                 logger.debug(f"Added stereo stream for language: {analysis.language}")
 
-        # Add output args
+        # Add FFmpeg default options
+        args.extend(["-hide_banner", "-strict", "-2", "-max_muxing_queue_size", "4096"])
+
+        # Add all output mappings and encoding options
         args.extend(output_args)
-        args.extend(["-y", self.output_file])
+
+        # Add output file (as a single argument)
+        args.extend(
+            ["-y", self.output_file[0]]
+        )  # self.output_file should be a single path
+
+        # Debug log the complete command
+        logger.debug("FFmpeg command: {}".format(" ".join(args)))
 
         return args
+
+    def set_input_file(self, path):
+        """Override to ensure input file is stored correctly"""
+        if isinstance(path, str):
+            self.input_file = [path]
+        else:
+            self.input_file = path
+
+    def set_output_file(self, path):
+        """Override to ensure output file is stored correctly"""
+        if isinstance(path, str):
+            self.output_file = [path]
+        else:
+            self.output_file = path
 
     def validate_encoder(self, encoder: str) -> bool:
         """New function to validate encoder availability"""
