@@ -22,7 +22,7 @@ Features:
 
 import logging
 import os
-from typing import Dict, List
+from typing import List
 
 from seb_custom.lib.ffmpeg import Parser, Probe, StreamMapper
 from unmanic.libs.directoryinfo import UnmanicDirectoryInfo
@@ -184,8 +184,24 @@ class PluginStreamMapper(StreamMapper):
     def __init__(self):
         super(PluginStreamMapper, self).__init__(logger, ["audio"])
         self.settings = None
-        self.streams_by_language: Dict[str, List[AudioStreamInfo]] = {}
-        self.stereo_streams_by_language: Dict[str, AudioStreamInfo] = {}
+        self.streams_to_map = []  # Initialize the missing attribute
+        self.streams_by_language = {}
+        self.stereo_streams_by_language = {}
+
+    def set_probe(self, probe):
+        """Override to properly initialize streams_to_map"""
+        super(PluginStreamMapper, self).set_probe(probe)
+
+        # Initialize list of audio streams to process
+        self.streams_to_map = []
+        for stream_info in self.probe.get_streams_by_type("audio"):
+            stream_id = stream_info.get("index")
+            if stream_id is not None:
+                self.streams_to_map.append(stream_id)
+
+        logger.debug(
+            f"Initialized {len(self.streams_to_map)} audio streams for processing"
+        )
 
     def log_stream_info(self, analysis: AudioStreamInfo, prefix: str = "") -> None:
         """Helper to consistently log stream information"""
@@ -334,6 +350,11 @@ class PluginStreamMapper(StreamMapper):
     def analyze_streams(self, probe_streams: List[dict]) -> None:
         """Analyze all audio streams and categorize them"""
         logger.info("Beginning comprehensive audio stream analysis...")
+
+        # Reset stream tracking
+        self.streams_to_map = []
+        self.streams_by_language.clear()
+        self.stereo_streams_by_language.clear()
 
         # Track statistics for logging
         stats = {
