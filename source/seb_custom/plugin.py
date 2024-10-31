@@ -531,16 +531,23 @@ class PluginStreamMapper(StreamMapper):
             }
 
     def get_ffmpeg_args(self) -> List[str]:
-        """Modified to ensure proper argument handling"""
+        """Modified to handle all streams correctly"""
         # Start with base command args
-        args = []
+        args = [
+            "-hide_banner",  # Cleaner output
+            "-loglevel",
+            "info",  # Informative logging
+            "-i",
+            self.input_file[0],  # Input file
+            "-map",
+            "0",  # Map all streams by default
+            "-c",
+            "copy",  # Copy all streams by default
+            "-max_muxing_queue_size",
+            "4096",  # Prevent queue overflow
+        ]
 
-        # Add input file (as a single argument)
-        args.extend(
-            ["-i", self.input_file[0]]
-        )  # self.input_file should be a single path
-
-        # Process streams in correct order
+        # Process audio streams in correct order
         output_args = []
         processed_languages = set()
         stereo_languages = set()
@@ -558,14 +565,21 @@ class PluginStreamMapper(StreamMapper):
                 )
                 continue
 
-            mapping = self.custom_stream_mapping(stream_info, stream_id)
-            output_args.extend(mapping["stream_mapping"])
-            output_args.extend(mapping["stream_encoding"])
-            processed_languages.add(analysis.language)
+            # Build audio mapping for this stream
+            mapping = self._build_audio_mapping(stream_info, stream_id)
+            if mapping:
+                # Remove default copy mapping for this stream
+                output_args.extend(["-map", "-0:a:" + str(stream_id)])
+                # Add our custom mapping
+                output_args.extend(mapping["stream_mapping"])
+                output_args.extend(mapping["stream_encoding"])
+                processed_languages.add(analysis.language)
 
-            logger.debug(f"Added main stream for language: {analysis.language}")
+                logger.debug(
+                    f"Added main stream mapping for language: {analysis.language}"
+                )
 
-        # Second pass: Add stereo/compatibility streams
+        # Second pass: Add stereo/compatibility streams if needed
         logger.info("Processing stereo compatibility streams...")
         for stream_id in self.streams_to_map:
             stream_info = self.probe.get_stream_info(stream_id)
@@ -581,23 +595,38 @@ class PluginStreamMapper(StreamMapper):
                 output_args.extend(stereo_mapping["stream_encoding"])
                 stereo_languages.add(analysis.language)
 
-                logger.debug(f"Added stereo stream for language: {analysis.language}")
+                logger.debug(
+                    f"Added stereo stream mapping for language: {analysis.language}"
+                )
 
-        # Add FFmpeg default options
-        args.extend(["-hide_banner", "-strict", "-2", "-max_muxing_queue_size", "4096"])
-
-        # Add all output mappings and encoding options
+        # Add all mappings and encoding options
         args.extend(output_args)
 
-        # Add output file (as a single argument)
-        args.extend(
-            ["-y", self.output_file[0]]
-        )  # self.output_file should be a single path
+        # Add output file
+        args.extend(["-y", self.output_file[0]])
 
-        # Debug log the complete command
+        # Log the complete command for debugging
         logger.debug("FFmpeg command: {}".format(" ".join(args)))
 
         return args
+
+
+def _build_audio_mapping(self, stream_info: dict, stream_id: int):
+    """Helper to build audio stream mapping"""
+    analysis = AudioStreamInfo(stream_info)
+    needs_sample_rate_conversion = analysis.sample_rate > self.settings.get_setting(
+        "target_sample_rate"
+    )
+
+    if not needs_sample_rate_conversion and not self.settings.get_setting(
+        "force_processing"
+    ):
+        logger.debug(
+            f"Stream {stream_id} doesn't need processing, will use default copy"
+        )
+        return None
+
+    return self.custom_stream_mapping(stream_info, stream_id)
 
     def set_input_file(self, path):
         """Override to ensure input file is stored correctly"""
