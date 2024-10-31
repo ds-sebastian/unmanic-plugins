@@ -475,7 +475,3 @@ def test_logger():
     logger.warning("Audio Processor plugin test warning message")
     logger.error("Audio Processor plugin test error message")
     logger.critical("Audio Processor plugin test critical message")
-
-
-# Register plugin components
-plugin_info = build_config_json()
