@@ -477,135 +477,113 @@ class PluginStreamMapper(StreamMapper):
 
         return False
 
+    def _needs_stereo_version(self, analysis: AudioStreamInfo) -> bool:
+        """Determine if we need to create a stereo version of this stream"""
+        # No stereo version needed if we're already stereo
+        if analysis.channels <= 2:
+            return False
+
+        # No stereo version if we already have one for this language
+        if analysis.language in self.stereo_streams_by_language:
+            logger.debug(
+                f"Stereo version already exists for language {analysis.language}"
+            )
+            return False
+
+        # Check if stereo creation is enabled
+        if not self.settings.get_setting("create_stereo_tracks"):
+            return False
+
+        # Don't create stereo for commentary tracks
+        if self._is_commentary(analysis):
+            logger.debug("Skipping stereo creation for commentary track")
+            return False
+
+        return True
+
     def custom_stream_mapping(self, stream_info: dict, stream_id: int):
-        """Modified to handle channel validation and constraints"""
+        """Modified to fix stream mapping logic"""
         try:
             # Validate stream info
             analysis = AudioStreamInfo(stream_info)
+            needs_sample_rate_conversion = (
+                analysis.sample_rate > self.settings.get_setting("target_sample_rate")
+            )
 
-            # Get appropriate encoder
-            try:
-                encoder = self.get_encoder_for_stream(analysis)
-            except ValueError as e:
-                logger.error(f"No suitable encoder found: {str(e)}")
-                # Fallback to stream copy if we can't encode
-                return {
-                    "stream_mapping": ["-map", f"0:a:{stream_id}"],
-                    "stream_encoding": [f"-c:a:{stream_id}", "copy"],
-                }
+            # Log processing plan
+            logger.debug(f"""
+            Stream mapping plan:
+                Stream ID: {stream_id}
+                Sample rate conversion needed: {needs_sample_rate_conversion}
+                Current channels: {analysis.channels}
+                Current sample rate: {analysis.sample_rate}
+                Language: {analysis.language}
+            """)
 
-            # Check channel constraints
-            if encoder == "libfdk_aac" and analysis.channels > 6:
-                logger.warning(
-                    f"libfdk_aac limited to 6 channels, input has {analysis.channels}. "
-                    "Audio will be downmixed."
+            # Special handling for different stream types
+            if self._is_commentary(analysis):
+                return self._handle_commentary_track(analysis, stream_id)
+            elif analysis.is_atmos:
+                return self._handle_atmos_track(
+                    analysis, stream_id, needs_sample_rate_conversion
                 )
-                # Force 5.1 for libfdk_aac
-                target_channels = 6
+
+            # Standard processing
+            if needs_sample_rate_conversion:
+                # Build new mapping
+                return self._create_multichannel_mapping(analysis, stream_id)
             else:
-                target_channels = analysis.channels
-
-            mapping = self.build_stream_mapping(stream_info, stream_id)
-            if not mapping or not mapping.get("stream_mapping"):
-                logger.warning(f"Failed to build mapping for stream {stream_id}")
-                # Fallback to copy
+                # Copy stream if no processing needed
                 return {
                     "stream_mapping": ["-map", f"0:a:{stream_id}"],
                     "stream_encoding": [f"-c:a:{stream_id}", "copy"],
                 }
-
-            # Add channel constraint if needed
-            if target_channels != analysis.channels:
-                mapping["stream_encoding"].extend(
-                    [f"-ac:a:{stream_id}", str(target_channels)]
-                )
-
-            return mapping
 
         except Exception as e:
             logger.error(f"Error mapping stream {stream_id}: {str(e)}")
-            # Safe fallback
             return {
                 "stream_mapping": ["-map", f"0:a:{stream_id}"],
                 "stream_encoding": [f"-c:a:{stream_id}", "copy"],
             }
 
     def get_ffmpeg_args(self) -> List[str]:
-        """Modified to handle all streams correctly"""
-        # Start with base command args
+        """Simplified FFmpeg args generation"""
+        # Ensure we have valid paths
+        if not self.input_file or not self.output_file:
+            logger.error("Missing input or output file")
+            return []
+
+        # Base command
         args = [
-            "-hide_banner",  # Cleaner output
+            "-hide_banner",
             "-loglevel",
-            "info",  # Informative logging
+            "info",
             "-i",
-            self.input_file[0],  # Input file
+            self.input_file[0],
             "-map",
-            "0",  # Map all streams by default
-            "-c",
-            "copy",  # Copy all streams by default
-            "-max_muxing_queue_size",
-            "4096",  # Prevent queue overflow
+            "0:v",  # Map video
+            "-c:v",
+            "copy",  # Copy video
+            "-map",
+            "0:s?",  # Map subtitles if present
+            "-c:s",
+            "copy",  # Copy subtitles
+            "-map_chapters",
+            "0",  # Keep chapters
         ]
 
-        # Process audio streams in correct order
-        output_args = []
-        processed_languages = set()
-        stereo_languages = set()
-
-        # First pass: Process high-quality main streams
-        logger.info("Processing main high-quality streams...")
+        # Process audio streams
         for stream_id in self.streams_to_map:
             stream_info = self.probe.get_stream_info(stream_id)
-            analysis = AudioStreamInfo(stream_info)
-
-            # Skip if we already processed a main stream for this language
-            if analysis.language in processed_languages:
-                logger.debug(
-                    f"Skipping duplicate main stream for language: {analysis.language}"
-                )
-                continue
-
-            # Build audio mapping for this stream
-            mapping = self._build_audio_mapping(stream_info, stream_id)
+            mapping = self.custom_stream_mapping(stream_info, stream_id)
             if mapping:
-                # Remove default copy mapping for this stream
-                output_args.extend(["-map", "-0:a:" + str(stream_id)])
-                # Add our custom mapping
-                output_args.extend(mapping["stream_mapping"])
-                output_args.extend(mapping["stream_encoding"])
-                processed_languages.add(analysis.language)
-
-                logger.debug(
-                    f"Added main stream mapping for language: {analysis.language}"
-                )
-
-        # Second pass: Add stereo/compatibility streams if needed
-        logger.info("Processing stereo compatibility streams...")
-        for stream_id in self.streams_to_map:
-            stream_info = self.probe.get_stream_info(stream_id)
-            analysis = AudioStreamInfo(stream_info)
-
-            if (
-                analysis.language not in stereo_languages
-                and analysis.channels > 2
-                and self._needs_stereo_version(analysis)
-            ):
-                stereo_mapping = self._create_stereo_downmix(analysis, stream_id)
-                output_args.extend(stereo_mapping["stream_mapping"])
-                output_args.extend(stereo_mapping["stream_encoding"])
-                stereo_languages.add(analysis.language)
-
-                logger.debug(
-                    f"Added stereo stream mapping for language: {analysis.language}"
-                )
-
-        # Add all mappings and encoding options
-        args.extend(output_args)
+                args.extend(mapping["stream_mapping"])
+                args.extend(mapping["stream_encoding"])
 
         # Add output file
-        args.extend(["-y", self.output_file[0]])
+        args.extend(["-max_muxing_queue_size", "4096", "-y", self.output_file[0]])
 
-        # Log the complete command for debugging
+        # Log command
         logger.debug("FFmpeg command: {}".format(" ".join(args)))
 
         return args
