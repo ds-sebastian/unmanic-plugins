@@ -144,7 +144,10 @@ class PluginStreamMapper(StreamMapper):
             if not analysis:
                 logger.warning(f"Stream analysis failed, copying stream {stream_id}")
                 return {
-                    "stream_mapping": ["-map", f"0:a:{stream_id}"],
+                    "stream_mapping": [
+                        "-map",
+                        f"0:a:{analysis['index']-1}",
+                    ],  # Subtract 1 from index
                     "stream_encoding": [f"-c:a:{self.stream_count}", "copy"],
                 }
 
@@ -152,7 +155,10 @@ class PluginStreamMapper(StreamMapper):
             stream_encoding = []
 
             # MAIN STREAM HANDLING
-            stream_mapping.extend(["-map", f"0:a:{stream_id}"])
+            # Fix the stream index here
+            stream_mapping.extend(
+                ["-map", f"0:a:{analysis['index']-1}"]
+            )  # Subtract 1 from index
 
             if analysis["sample_rate"] > self.target_sample_rate:
                 # Need to convert sample rate - calculate bitrate first
@@ -243,7 +249,9 @@ class PluginStreamMapper(StreamMapper):
 """)
 
                 # Add stereo stream mapping
-                stream_mapping.extend(["-map", f"0:a:{stream_id}"])
+                stream_mapping.extend(
+                    ["-map", f"0:a:{analysis['index']-1}"]
+                )  # Subtract 1 from index
 
                 stereo_encoding = [
                     f"-c:a:{self.stream_count}",
