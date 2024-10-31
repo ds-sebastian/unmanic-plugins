@@ -544,3 +544,14 @@ def on_worker_process(data):
         data["command_progress_parser"] = parser.parse_progress
 
     return data
+
+
+class Plugin(object):
+    def __init__(self):
+        self.name = "Seb Custom Encoder"
+        self.settings = None
+
+    def get_settings(self):
+        if not self.settings:
+            self.settings = Settings()
+        return self.settings
