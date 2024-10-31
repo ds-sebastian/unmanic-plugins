@@ -162,10 +162,20 @@ class AudioStreamInfo:
         self.title = stream_info.get("tags", {}).get("title", "")
 
     def _detect_atmos(self, stream_info: dict) -> bool:
-        """Detect if stream is Atmos/TrueHD"""
+        """Improved Atmos detection"""
         codec_name = stream_info.get("codec_name", "").lower()
         format_name = stream_info.get("format_name", "").lower()
-        return "truehd" in codec_name or "atmos" in format_name
+        profile = stream_info.get("profile", "").lower()
+        tags = stream_info.get("tags", {})
+
+        return any(
+            [
+                "truehd" in codec_name and "atmos" in format_name,
+                "eac3" in codec_name and "atmos" in format_name,
+                "atmos" in tags.get("format", "").lower(),
+                "atmos" in profile,
+            ]
+        )
 
 
 class PluginStreamMapper(StreamMapper):
@@ -438,53 +448,170 @@ class PluginStreamMapper(StreamMapper):
         return False
 
     def custom_stream_mapping(self, stream_info: dict, stream_id: int):
-        """Bridge between StreamMapper and our build_stream_mapping"""
-        logger.debug(f"Generating mapping for stream {stream_id}")
-        mapping = self.build_stream_mapping(stream_info, stream_id)
+        """Modified to handle channel validation and constraints"""
+        try:
+            # Validate stream info
+            analysis = AudioStreamInfo(stream_info)
 
-        # Log the mapping that will be used
-        logger.debug(f"""
-    Stream mapping for stream {stream_id}:
-        Mapping args: {' '.join(mapping['stream_mapping'])}
-        Encoding args: {' '.join(mapping['stream_encoding'])}
-    """)
+            # Get appropriate encoder
+            try:
+                encoder = self.get_encoder_for_stream(analysis)
+            except ValueError as e:
+                logger.error(f"No suitable encoder found: {str(e)}")
+                # Fallback to stream copy if we can't encode
+                return {
+                    "stream_mapping": ["-map", f"0:a:{stream_id}"],
+                    "stream_encoding": [f"-c:a:{stream_id}", "copy"],
+                }
 
-        return mapping
+            # Check channel constraints
+            if encoder == "libfdk_aac" and analysis.channels > 6:
+                logger.warning(
+                    f"libfdk_aac limited to 6 channels, input has {analysis.channels}. "
+                    "Audio will be downmixed."
+                )
+                # Force 5.1 for libfdk_aac
+                target_channels = 6
+            else:
+                target_channels = analysis.channels
+
+            mapping = self.build_stream_mapping(stream_info, stream_id)
+            if not mapping or not mapping.get("stream_mapping"):
+                logger.warning(f"Failed to build mapping for stream {stream_id}")
+                # Fallback to copy
+                return {
+                    "stream_mapping": ["-map", f"0:a:{stream_id}"],
+                    "stream_encoding": [f"-c:a:{stream_id}", "copy"],
+                }
+
+            # Add channel constraint if needed
+            if target_channels != analysis.channels:
+                mapping["stream_encoding"].extend(
+                    [f"-ac:a:{stream_id}", str(target_channels)]
+                )
+
+            return mapping
+
+        except Exception as e:
+            logger.error(f"Error mapping stream {stream_id}: {str(e)}")
+            # Safe fallback
+            return {
+                "stream_mapping": ["-map", f"0:a:{stream_id}"],
+                "stream_encoding": [f"-c:a:{stream_id}", "copy"],
+            }
 
     def get_ffmpeg_args(self) -> List[str]:
-        """Override parent's get_ffmpeg_args to ensure proper stream order"""
+        """Modified to enforce correct stream ordering and prevent duplicates"""
         # Start with input args
-        output_args = []
-
-        # Process all streams in order
-        if self.streams_to_map:
-            logger.debug(f"Processing {len(self.streams_to_map)} streams")
-            for stream_id in self.streams_to_map:
-                stream_info = self.probe.get_stream_info(stream_id)
-                mapping = self.custom_stream_mapping(stream_info, stream_id)
-
-                if mapping.get("stream_mapping"):
-                    output_args.extend(mapping["stream_mapping"])
-                if mapping.get("stream_encoding"):
-                    output_args.extend(mapping["stream_encoding"])
-
-        # Add all default args
         args = []
         args.extend(self.main_options)
         args.extend(self.input_file)
         args.extend(self.advanced_options)
+
+        # Process streams in correct order
+        output_args = []
+        processed_languages = set()
+        stereo_languages = set()
+
+        # First pass: Process high-quality main streams
+        logger.info("Processing main high-quality streams...")
+        for stream_id in self.streams_to_map:
+            stream_info = self.probe.get_stream_info(stream_id)
+            analysis = AudioStreamInfo(stream_info)
+
+            # Skip if we already processed a main stream for this language
+            if analysis.language in processed_languages:
+                logger.debug(
+                    f"Skipping duplicate main stream for language: {analysis.language}"
+                )
+                continue
+
+            mapping = self.custom_stream_mapping(stream_info, stream_id)
+            output_args.extend(mapping["stream_mapping"])
+            output_args.extend(mapping["stream_encoding"])
+            processed_languages.add(analysis.language)
+
+            logger.debug(f"Added main stream for language: {analysis.language}")
+
+        # Second pass: Add stereo/compatibility streams
+        logger.info("Processing stereo compatibility streams...")
+        for stream_id in self.streams_to_map:
+            stream_info = self.probe.get_stream_info(stream_id)
+            analysis = AudioStreamInfo(stream_info)
+
+            # Only create stereo version if:
+            # 1. Language not already has a stereo version
+            # 2. Original is multichannel
+            # 3. Not already processed this language for stereo
+            if (
+                analysis.language not in stereo_languages
+                and analysis.channels > 2
+                and self._needs_stereo_version(analysis)
+            ):
+                stereo_mapping = self._create_stereo_downmix(analysis, stream_id)
+                output_args.extend(stereo_mapping["stream_mapping"])
+                output_args.extend(stereo_mapping["stream_encoding"])
+                stereo_languages.add(analysis.language)
+
+                logger.debug(f"Added stereo stream for language: {analysis.language}")
+
+        # Add output args
         args.extend(output_args)
         args.extend(["-y", self.output_file])
 
         return args
 
+    def validate_encoder(self, encoder: str) -> bool:
+        """New function to validate encoder availability"""
+        try:
+            # Run ffmpeg -encoders and check output
+            import subprocess
+
+            result = subprocess.run(
+                ["ffmpeg", "-encoders"], capture_output=True, text=True
+            )
+            return encoder in result.stdout
+        except Exception as e:
+            logger.error(f"Failed to validate encoder {encoder}: {str(e)}")
+            return False
+
     def get_encoder_for_stream(self, stream_info: AudioStreamInfo) -> str:
-        """Get appropriate encoder based on stream properties"""
+        """Modified to handle encoder validation and fallbacks"""
+        # First choice encoders
         if stream_info.channels > 6:
-            return self.settings.get_setting("multichannel_71_encoder")
+            encoder = self.settings.get_setting("multichannel_71_encoder")  # opus
         elif stream_info.channels > 2:
-            return self.settings.get_setting("multichannel_51_encoder")
-        return self.settings.get_setting("stereo_encoder")
+            encoder = self.settings.get_setting("multichannel_51_encoder")  # libfdk_aac
+        else:
+            encoder = self.settings.get_setting("stereo_encoder")  # libfdk_aac
+
+        # Validate encoder is available
+        if not self.validate_encoder(encoder):
+            logger.warning(
+                f"Preferred encoder {encoder} not available, using fallbacks"
+            )
+
+            # Fallback chain
+            if encoder == "libfdk_aac":
+                fallbacks = ["aac", "libopus", "ac3"]
+            elif encoder == "opus":
+                # For >6 channels, we need opus
+                logger.error(
+                    f"Cannot process {stream_info.channels} channels without opus encoder"
+                )
+                raise ValueError(
+                    f"No suitable encoder available for {stream_info.channels} channels"
+                )
+
+            # Try fallbacks
+            for fallback in fallbacks:
+                if self.validate_encoder(fallback):
+                    logger.info(f"Using fallback encoder: {fallback}")
+                    return fallback
+
+            raise ValueError("No suitable encoder available")
+
+        return encoder
 
     def calculate_bitrate(
         self, stream_info: AudioStreamInfo, target_channels: int = None
