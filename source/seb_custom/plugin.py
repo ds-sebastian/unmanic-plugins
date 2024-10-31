@@ -194,10 +194,19 @@ class PluginStreamMapper(StreamMapper):
 
         # Initialize list of audio streams to process
         self.streams_to_map = []
-        for stream_info in self.probe.get_streams_by_type("audio"):
-            stream_id = stream_info.get("index")
-            if stream_id is not None:
-                self.streams_to_map.append(stream_id)
+
+        # Get the probe data and filter for audio streams
+        probe_data = self.probe.get_probe()
+        if not probe_data:
+            logger.error("No probe data available")
+            return
+
+        for stream in probe_data.get("streams", []):
+            if stream.get("codec_type") == "audio":
+                stream_id = stream.get("index")
+                if stream_id is not None:
+                    self.streams_to_map.append(stream_id)
+                    logger.debug(f"Found audio stream at index {stream_id}")
 
         logger.debug(
             f"Initialized {len(self.streams_to_map)} audio streams for processing"
