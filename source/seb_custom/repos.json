@@ -8,14 +8,14 @@
     },
     "plugins": [
         {
-            "author": "yajrendrag",
+            "author": "ds-sebastian",
             "compatibility": [
                 1,
                 2
             ],
-            "description": "Detect each audio stream language and tag stream with results",
-            "icon": "https://raw.githubusercontent.com/ds-sebastian/unmanic-plugins/master/source/seb-custom/icon.png",
-            "id": "seb-custom",
+            "description": "Custom preocessor",
+            "icon": "https://raw.githubusercontent.com/ds-sebastian/unmanic-plugins/master/source/seb_custom/icon.png",
+            "id": "seb_custom",
             "name": "Seb Custom Audio Processor (for Videos)",
             "platform": [
                 "all"
