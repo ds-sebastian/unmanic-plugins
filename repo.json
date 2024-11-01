@@ -1,0 +1,30 @@
+{
+    "repo": {
+        "id": "seb_custom",
+        "name": "ds-sebastian",
+        "icon": "",
+        "repo_data_directory": "https://raw.githubusercontent.com/ds-sebastian/unmanic-plugins/repo/",
+        "repo_data_url": "https://raw.githubusercontent.com/ds-sebastian/unmanic-plugins/repo/repo.json"
+    },
+    "plugins": [
+        {
+            "author": "ds-sebastian",
+            "compatibility": [
+                2
+            ],
+            "description": "A comprehensive audio processing plugin that ensures optimal compatibility with modern devices by managing sample rates, channel counts, and volume levels while preserving quality and metadata.",
+            "icon": "",
+            "id": "seb_custom",
+            "name": "Seb Custom Encoder",
+            "platform": [
+                "all"
+            ],
+            "priorities": {
+                "on_library_management_file_test": 99,
+                "on_worker_process": 0
+            },
+            "tags": "audio,ffmpeg,normalisation,stereo,conversion",
+            "version": "0.0.1"
+        }
+    ]
+}
