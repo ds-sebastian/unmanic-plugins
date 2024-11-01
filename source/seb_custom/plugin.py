@@ -310,16 +310,6 @@ class PluginStreamMapper(StreamMapper):
                     # Determine processing needs
                     processing = self.determine_stream_processing(stream, has_stereo)
 
-                    # Log processing decision
-                    logger.debug(f"""
-    Stream {stream['index']} processing plan:
-        Needs processing: {processing['needs_processing']}
-        Process type: {processing['process_type']}
-        Encoder: {processing['encoder']}
-        Needs stereo: {processing['needs_stereo']}
-        Reasons: {', '.join(processing['reasons'])}
-    """)
-
                     # Map original stream
                     ffmpeg_args.extend(["-map", f'0:a:{stream["absolute_index"]}'])
 
@@ -330,15 +320,11 @@ class PluginStreamMapper(StreamMapper):
                             processing["encoder"],
                             f"-ar:a:{self.stream_count}",
                             str(self.target_sample_rate),
+                            f"-filter:a:{self.stream_count}",
+                            f"loudnorm=I={self.settings.settings['surround_normalize']['I']}:"
+                            f"LRA={self.settings.settings['surround_normalize']['LRA']}:"
+                            f"TP={self.settings.settings['surround_normalize']['TP']}",
                         ]
-
-                        # Add normalization for converted streams
-                        stream_args.extend(
-                            [
-                                f"-filter:a:{self.stream_count}",
-                                "loudnorm=I=-24:LRA=7:TP=-2",
-                            ]
-                        )
 
                         # Add bitrate if calculated
                         if processing["bitrate"]:
@@ -346,81 +332,28 @@ class PluginStreamMapper(StreamMapper):
                                 [f"-b:a:{self.stream_count}", processing["bitrate"]]
                             )
 
-                        # Add channel limitation if needed
-                        if (
-                            processing["encoder"] == "libfdk_aac"
-                            and int(stream["channels"]) > 6
-                        ):
-                            stream_args.extend([f"-ac:a:{self.stream_count}", "6"])
+                        ffmpeg_args.extend(stream_args)
                     else:
                         # Just copy the stream
-                        stream_args = [f"-c:a:{self.stream_count}", "copy"]
+                        ffmpeg_args.extend([f"-c:a:{self.stream_count}", "copy"])
 
-                    # Preserve metadata
+                    # Add metadata
                     if stream["language"] != "und":
-                        stream_args.extend(
+                        ffmpeg_args.extend(
                             [
                                 f"-metadata:s:a:{self.stream_count}",
                                 f'language={stream["language"]}',
                             ]
                         )
-                    if stream["title"]:
-                        stream_args.extend(
+                    if stream.get("title"):
+                        ffmpeg_args.extend(
                             [
                                 f"-metadata:s:a:{self.stream_count}",
                                 f'title={stream["title"]}',
                             ]
                         )
 
-                    # Add the stream arguments
-                    ffmpeg_args.extend(stream_args)
                     self.stream_count += 1
-
-                    # Add stereo version if needed
-                    if processing["needs_stereo"]:
-                        logger.debug(
-                            f"Creating stereo version for stream {stream['index']}"
-                        )
-
-                        # Map from original stream again
-                        ffmpeg_args.extend(["-map", f'0:a:{stream["absolute_index"]}'])
-
-                        # Setup stereo conversion
-                        stereo_args = [
-                            f"-c:a:{self.stream_count}",
-                            "libfdk_aac",
-                            f"-ac:a:{self.stream_count}",
-                            "2",
-                            f"-ar:a:{self.stream_count}",
-                            str(self.target_sample_rate),
-                            f"-filter:a:{self.stream_count}",
-                            "loudnorm=I=-16:LRA=11:TP=-1",
-                        ]
-
-                        # Add stereo bitrate if calculated
-                        if processing["stereo_bitrate"]:
-                            stereo_args.extend(
-                                [
-                                    f"-b:a:{self.stream_count}",
-                                    processing["stereo_bitrate"],
-                                ]
-                            )
-
-                        # Add metadata
-                        stereo_args.extend(
-                            [f"-metadata:s:a:{self.stream_count}", "title=Stereo"]
-                        )
-                        if stream["language"] != "und":
-                            stereo_args.extend(
-                                [
-                                    f"-metadata:s:a:{self.stream_count}",
-                                    f'language={stream["language"]}',
-                                ]
-                            )
-
-                        # Add the stereo arguments
-                        ffmpeg_args.extend(stereo_args)
-                        self.stream_count += 1
 
                 except Exception as e:
                     logger.error(f"Error processing stream {stream['index']}: {str(e)}")
@@ -431,9 +364,6 @@ class PluginStreamMapper(StreamMapper):
             ffmpeg_args.extend(
                 ["-max_muxing_queue_size", "4096", "-y", self.output_file]
             )
-
-            # Log full command for debugging
-            logger.debug("FFmpeg command: " + " ".join(ffmpeg_args))
 
             return ffmpeg_args
 
