@@ -533,27 +533,32 @@ def on_postprocessor_task_results(data):
 
                 # Verify expected results
                 has_high_sample_rate = any(
-                    int(s.get("sample_rate", "0")) > 48000 for s in audio_streams
+                    int(str(s.get("sample_rate", "0"))) > 48000 for s in audio_streams
                 )
-                has_multichannel = any(s.get("channels", 0) > 2 for s in audio_streams)
+                has_multichannel = any(
+                    int(str(s.get("channels", "2"))) > 2 for s in audio_streams
+                )
 
                 if has_high_sample_rate:
                     logger.error(
                         "Found streams with sample rate > 48kHz after processing!"
                     )
                     for s in audio_streams:
-                        if s.get("sample_rate", 0) > 48000:
-                            logger.error(f"Stream still has high sample rate: {s}")
+                        try:
+                            sample_rate = int(str(s.get("sample_rate", "0")))
+                            if sample_rate > 48000:
+                                logger.error(f"Stream still has high sample rate: {s}")
+                        except (ValueError, TypeError) as e:
+                            logger.error(
+                                f"Error converting sample rate '{s.get('sample_rate')}': {e}"
+                            )
 
                 if has_multichannel and not any(
-                    s.get("channels") == 2 for s in audio_streams
+                    int(str(s.get("channels", "2"))) == 2 for s in audio_streams
                 ):
                     logger.error(
                         "Multichannel content present but no stereo version found!"
                     )
-
-            else:
-                logger.error(f"Failed to probe processed file: {destination_file}")
 
     except Exception as e:
         logger.error(f"Error in post-processing: {str(e)}")
