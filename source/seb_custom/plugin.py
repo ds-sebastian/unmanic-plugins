@@ -54,19 +54,19 @@ class PluginStreamMapper(StreamMapper):
                 audio_index = stream.get("index", 0)
                 logger.info(f"\nAnalyzing audio stream {audio_index}:")
 
-            stream_info = {
-                "index": audio_index,
-                "absolute_index": len(audio_streams),
-                "codec": stream.get("codec_name", "").lower(),
-                "channels": int(stream.get("channels", 2)),
-                # Convert sample_rate to int and provide fallback
-                "sample_rate": int(stream.get("sample_rate", "48000")),
-                "bit_rate": stream.get("bit_rate"),
-                "language": stream.get("tags", {}).get("language", "und"),
-                "title": stream.get("tags", {}).get("title", ""),
-                "disposition": stream.get("disposition", {}),
-                "tags": stream.get("tags", {}),
-            }
+                # Fix: Properly indent stream_info within try block
+                stream_info = {
+                    "index": audio_index,
+                    "absolute_index": len(audio_streams),
+                    "codec": stream.get("codec_name", "").lower(),
+                    "channels": int(stream.get("channels", 2)),
+                    "sample_rate": int(stream.get("sample_rate", "48000")),
+                    "bit_rate": stream.get("bit_rate"),
+                    "language": stream.get("tags", {}).get("language", "und"),
+                    "title": stream.get("tags", {}).get("title", ""),
+                    "disposition": stream.get("disposition", {}),
+                    "tags": stream.get("tags", {}),
+                }
 
                 # Log stream details
                 logger.info(f"""Stream details:
@@ -166,15 +166,19 @@ class PluginStreamMapper(StreamMapper):
                     try:
                         # Handle both string and integer bit_rate values
                         source_bitrate = str(stream_info["bit_rate"])
-                        if source_bitrate.endswith('k'):
-                            source_bitrate = int(source_bitrate.rstrip('k')) * 1000
+                        if source_bitrate.endswith("k"):
+                            source_bitrate = int(source_bitrate.rstrip("k")) * 1000
                         else:
                             source_bitrate = int(source_bitrate)
 
-                        per_channel_bitrate = int(source_bitrate / (1000 * stream_info["channels"]))
+                        per_channel_bitrate = int(
+                            source_bitrate / (1000 * stream_info["channels"])
+                        )
 
                         if needs_processing:
-                            bitrate = f"{per_channel_bitrate * stream_info['channels']}k"
+                            bitrate = (
+                                f"{per_channel_bitrate * stream_info['channels']}k"
+                            )
                         if needs_stereo:
                             stereo_bitrate = f"{per_channel_bitrate * 2}k"
 
