@@ -342,6 +342,47 @@ class PluginStreamMapper(StreamMapper):
             return []
 
 
+def test_stream_needs_processing(self, stream_info: dict) -> bool:
+    """
+    Test if a stream needs to be processed.
+    Returns True if stream should be processed, False otherwise.
+    """
+    try:
+        # First check if it's an audio stream
+        if stream_info.get("codec_type") != "audio":
+            return False
+
+        # Convert sample rate to int, with fallback to default
+        try:
+            sample_rate = int(str(stream_info.get("sample_rate", "48000")))
+            channels = int(str(stream_info.get("channels", "2")))
+        except (ValueError, TypeError) as e:
+            logger.error(f"Error converting stream values: {e}")
+            return False
+
+        logger.debug(f"""Testing stream:
+    Sample Rate: {sample_rate}
+    Channels: {channels}
+    Target Rate: {self.target_sample_rate}""")
+
+        # Check if we need to process this stream
+        if sample_rate > self.target_sample_rate:
+            logger.debug(f"Stream needs processing - high sample rate: {sample_rate}")
+            return True
+
+        if channels > 2:
+            logger.debug(f"Stream needs processing - multichannel: {channels}")
+            return True
+
+        logger.debug("Stream does not need processing")
+        return False
+
+    except Exception as e:
+        logger.error(f"Error testing stream: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False
+
+
 def on_library_management_file_test(data):
     """
     Runner function - enables additional actions during the library management file tests.
