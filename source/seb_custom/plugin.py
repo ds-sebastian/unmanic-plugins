@@ -54,18 +54,19 @@ class PluginStreamMapper(StreamMapper):
                 audio_index = stream.get("index", 0)
                 logger.info(f"\nAnalyzing audio stream {audio_index}:")
 
-                stream_info = {
-                    "index": audio_index,
-                    "absolute_index": len(audio_streams),  # Track absolute position
-                    "codec": stream.get("codec_name", "").lower(),
-                    "channels": int(stream.get("channels", 2)),
-                    "sample_rate": int(stream.get("sample_rate", 48000)),
-                    "bit_rate": stream.get("bit_rate"),
-                    "language": stream.get("tags", {}).get("language", "und"),
-                    "title": stream.get("tags", {}).get("title", ""),
-                    "disposition": stream.get("disposition", {}),
-                    "tags": stream.get("tags", {}),
-                }
+            stream_info = {
+                "index": audio_index,
+                "absolute_index": len(audio_streams),
+                "codec": stream.get("codec_name", "").lower(),
+                "channels": int(stream.get("channels", 2)),
+                # Convert sample_rate to int and provide fallback
+                "sample_rate": int(stream.get("sample_rate", "48000")),
+                "bit_rate": stream.get("bit_rate"),
+                "language": stream.get("tags", {}).get("language", "und"),
+                "title": stream.get("tags", {}).get("title", ""),
+                "disposition": stream.get("disposition", {}),
+                "tags": stream.get("tags", {}),
+            }
 
                 # Log stream details
                 logger.info(f"""Stream details:
@@ -113,6 +114,8 @@ class PluginStreamMapper(StreamMapper):
             process_type = "copy"
             encoder = None
             reasons = []
+            bitrate = None
+            stereo_bitrate = None
 
             logger.info(f"""
     Determining processing for stream:
@@ -123,9 +126,14 @@ class PluginStreamMapper(StreamMapper):
     """)
 
             # Check if sample rate conversion needed
-            needs_sample_rate_conversion = (
-                stream_info["sample_rate"] > self.target_sample_rate
-            )
+            try:
+                needs_sample_rate_conversion = (
+                    int(stream_info["sample_rate"]) > self.target_sample_rate
+                )
+            except (ValueError, TypeError):
+                logger.error(f"Invalid sample rate value: {stream_info['sample_rate']}")
+                needs_sample_rate_conversion = False
+
             if needs_sample_rate_conversion:
                 needs_processing = True
                 process_type = "convert"
@@ -153,20 +161,20 @@ class PluginStreamMapper(StreamMapper):
                 )
 
             # Calculate bitrates if needed
-            bitrate = None
-            stereo_bitrate = None
             if needs_processing or needs_stereo:
-                try:
-                    if stream_info.get("bit_rate"):
-                        source_bitrate = int(stream_info["bit_rate"])
-                        per_channel_bitrate = int(
-                            source_bitrate / (1000 * stream_info["channels"])
-                        )
+                if stream_info.get("bit_rate"):
+                    try:
+                        # Handle both string and integer bit_rate values
+                        source_bitrate = str(stream_info["bit_rate"])
+                        if source_bitrate.endswith('k'):
+                            source_bitrate = int(source_bitrate.rstrip('k')) * 1000
+                        else:
+                            source_bitrate = int(source_bitrate)
+
+                        per_channel_bitrate = int(source_bitrate / (1000 * stream_info["channels"]))
 
                         if needs_processing:
-                            bitrate = (
-                                f"{per_channel_bitrate * stream_info['channels']}k"
-                            )
+                            bitrate = f"{per_channel_bitrate * stream_info['channels']}k"
                         if needs_stereo:
                             stereo_bitrate = f"{per_channel_bitrate * 2}k"
 
@@ -176,13 +184,13 @@ class PluginStreamMapper(StreamMapper):
         Main bitrate: {bitrate}
         Stereo bitrate: {stereo_bitrate}
     """)
-                    else:
-                        logger.info(
-                            "No source bitrate available, will use FFmpeg defaults"
-                        )
-                except Exception as e:
-                    logger.error(f"Error calculating bitrate: {str(e)}")
-                    logger.debug("Will use FFmpeg defaults")
+                    except (ValueError, TypeError) as e:
+                        logger.error(f"Error calculating bitrate: {str(e)}")
+                        logger.debug("Will use FFmpeg defaults")
+                        bitrate = None
+                        stereo_bitrate = None
+                else:
+                    logger.info("No source bitrate available, will use FFmpeg defaults")
 
             return {
                 "needs_processing": needs_processing,
@@ -521,7 +529,7 @@ def on_postprocessor_task_results(data):
 
                 # Verify expected results
                 has_high_sample_rate = any(
-                    s.get("sample_rate", 0) > 48000 for s in audio_streams
+                    int(s.get("sample_rate", "0")) > 48000 for s in audio_streams
                 )
                 has_multichannel = any(s.get("channels", 0) > 2 for s in audio_streams)
 
