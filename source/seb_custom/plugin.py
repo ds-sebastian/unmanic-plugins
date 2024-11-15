@@ -37,7 +37,7 @@ class Settings(PluginSettings):
     settings = {
         "advanced": False,
         "force_processing": False,
-        "target_sample_rate": 48000,  # Added target sample rate
+        "target_sample_rate": "48000",
         "max_muxing_queue_size": 2048,
         "main_options": "",
         "advanced_options": "",
@@ -51,12 +51,16 @@ class Settings(PluginSettings):
                 "label": "Write your own FFmpeg params",
             },
             "force_processing": {
-                "label": "Process streams even if audio is already encoded (ignore codec)",
+                "label": "Force processing (process streams even if audio is already encoded)",
             },
             "target_sample_rate": {
-                "label": "Target sample rate (Hz)",
-                "input_type": "number",
-                "default": 48000,
+                "label": "Target sample rate",
+                "input_type": "slider",
+                "slider_options": {
+                    "min": 8000,
+                    "max": 96000,
+                    "step": 100,
+                },
             },
             "max_muxing_queue_size": self.__set_max_muxing_queue_size_form_settings(),
             "main_options": self.__set_main_options_form_settings(),
