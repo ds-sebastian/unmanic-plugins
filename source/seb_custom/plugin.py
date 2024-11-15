@@ -26,7 +26,7 @@ Copyright:
 
 import logging
 
-from encoder_audio_libfdk_aac.lib.ffmpeg import Parser, Probe, StreamMapper
+from seb_custom.lib.ffmpeg import Parser, Probe, StreamMapper
 from unmanic.libs.unplugins.settings import PluginSettings
 
 # Configure plugin logger
