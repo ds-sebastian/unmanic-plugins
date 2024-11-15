@@ -4,317 +4,338 @@
 """
 unmanic-plugins.plugin.py
 
-Written by: Sebastian
-Date: October 31, 2024
+Written by:               Josh.5 <jsunnex@gmail.com>
+Modified by:             Claude <claude@anthropic.com>
+Date:                     14 Nov 2024
 
-Plugin for managing audio streams in media files:
-- Keeps original streams ≤48kHz untouched
-- Re-encodes >48kHz streams using OPUS (>6ch) or libfdk_aac (≤6ch)
-- Creates stereo compatibility versions of multichannel content
-- Applies normalization during encoding
-- Preserves all audio languages
+Copyright:
+    Copyright (C) 2021 Josh Sunnex
+    Copyright (C) 2024 Anthropic
+
+    This program is free software: you can redistribute it and/or modify it under the terms of the GNU General
+    Public License as published by the Free Software Foundation, version 3.
+
+    This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the
+    implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
+    for more details.
+
+    You should have received a copy of the GNU General Public License along with this program.
+    If not, see <https://www.gnu.org/licenses/>.
+
 """
 
 import logging
-import os
-import traceback
-from datetime import datetime
 
-from seb_custom.lib.ffmpeg import Parser, Probe, StreamMapper
-from unmanic.libs.directoryinfo import UnmanicDirectoryInfo
+from encoder_audio_libfdk_aac.lib.ffmpeg import Parser, Probe, StreamMapper
 from unmanic.libs.unplugins.settings import PluginSettings
 
 # Configure plugin logger
-logger = logging.getLogger("Unmanic.Plugin.seb_custom")
+logger = logging.getLogger("Unmanic.Plugin.encoder_audio_aac")
 
 
 class Settings(PluginSettings):
     settings = {
-        "keep_original_streams": True,
+        "advanced": False,
         "force_processing": False,
-        "surround_normalize": {"I": "-24.0", "LRA": "7.0", "TP": "-2.0"},
-        "stereo_normalize": {"I": "-16.0", "LRA": "11.0", "TP": "-1.0"},
+        "target_sample_rate": 48000,  # Added target sample rate
+        "max_muxing_queue_size": 2048,
+        "main_options": "",
+        "advanced_options": "",
+        "custom_options": "",
     }
+
+    def __init__(self, *args, **kwargs):
+        super(Settings, self).__init__(*args, **kwargs)
+        self.form_settings = {
+            "advanced": {
+                "label": "Write your own FFmpeg params",
+            },
+            "force_processing": {
+                "label": "Process streams even if audio is already encoded (ignore codec)",
+            },
+            "target_sample_rate": {
+                "label": "Target sample rate (Hz)",
+                "input_type": "number",
+                "default": 48000,
+            },
+            "max_muxing_queue_size": self.__set_max_muxing_queue_size_form_settings(),
+            "main_options": self.__set_main_options_form_settings(),
+            "advanced_options": self.__set_advanced_options_form_settings(),
+            "custom_options": self.__set_custom_options_form_settings(),
+        }
+
+    def __set_max_muxing_queue_size_form_settings(self):
+        values = {
+            "label": "Max input stream packet buffer",
+            "input_type": "slider",
+            "slider_options": {
+                "min": 1024,
+                "max": 10240,
+            },
+        }
+        if self.get_setting("advanced"):
+            values["display"] = "hidden"
+        return values
+
+    def __set_main_options_form_settings(self):
+        values = {
+            "label": "Write your own custom main options",
+            "input_type": "textarea",
+        }
+        if not self.get_setting("advanced"):
+            values["display"] = "hidden"
+        return values
+
+    def __set_advanced_options_form_settings(self):
+        values = {
+            "label": "Write your own custom advanced options",
+            "input_type": "textarea",
+        }
+        if not self.get_setting("advanced"):
+            values["display"] = "hidden"
+        return values
+
+    def __set_custom_options_form_settings(self):
+        values = {
+            "label": "Write your own custom audio options",
+            "input_type": "textarea",
+        }
+        if not self.get_setting("advanced"):
+            values["display"] = "hidden"
+        return values
 
 
 class PluginStreamMapper(StreamMapper):
     def __init__(self):
         super(PluginStreamMapper, self).__init__(logger, ["audio"])
-        self.target_sample_rate = 48000
-        self.stereo_versions = set()
-        self.stream_count = 0
+        self.codec = "aac"
+        self.encoder = "libfdk_aac"
         self.settings = None
-        logger.info("Initialized PluginStreamMapper")
 
-    def set_settings(self, settings):
+    def set_default_values(self, settings, abspath, probe):
+        """
+        Configure the stream mapper with defaults
+
+        :param settings:
+        :param abspath:
+        :param probe:
+        :return:
+        """
+        self.abspath = abspath
+        # Set the file probe data
+        self.set_probe(probe)
+        # Set the input file
+        self.set_input_file(abspath)
+        # Configure settings
         self.settings = settings
 
-    def analyze_stream(self, stream):
-        """Analyze single audio stream and return processing details"""
-        try:
-            stream_info = {
-                "index": stream.get("index", 0),
-                "codec": stream.get("codec_name", "").lower(),
-                "channels": int(stream.get("channels", 2)),
-                "sample_rate": int(stream.get("sample_rate", "48000")),
-                "bit_rate": stream.get("bit_rate"),
-                "language": stream.get("tags", {}).get("language", "und"),
-                "title": stream.get("tags", {}).get("title"),
-                "disposition": stream.get("disposition", {}),
-            }
+        # Build default options of advanced mode
+        if self.settings.get_setting("advanced"):
+            # If any main options are provided, overwrite them
+            main_options = settings.get_setting("main_options").split()
+            if main_options:
+                # Overwrite all main options
+                self.main_options = main_options
+            # If any advanced options are provided, overwrite them
+            advanced_options = settings.get_setting("advanced_options").split()
+            if advanced_options:
+                # Overwrite all advanced options
+                self.advanced_options = advanced_options
 
-            # Determine if processing needed
-            needs_processing = False
-            reasons = []
-
-            # Check sample rate
-            if stream_info["sample_rate"] > self.target_sample_rate:
-                needs_processing = True
-                reasons.append(
-                    f"Sample rate {stream_info['sample_rate']} > {self.target_sample_rate}"
-                )
-
-            # Check if needs stereo version
-            needs_stereo = False
-            if stream_info["channels"] > 2:
-                language_key = f"{stream_info['language']}_stereo"
-                if language_key not in self.stereo_versions:
-                    needs_stereo = True
-                    self.stereo_versions.add(language_key)
-                    reasons.append(
-                        f"Needs stereo version for {stream_info['channels']} channels"
-                    )
-
-            # Determine encoder
-            encoder = None
-            if needs_processing:
-                if stream_info["channels"] > 6:
-                    encoder = "libopus"
-                else:
-                    encoder = "libfdk_aac"
-
-            return {
-                "info": stream_info,
-                "needs_processing": needs_processing,
-                "needs_stereo": needs_stereo,
-                "encoder": encoder,
-                "reasons": reasons,
-            }
-
-        except Exception as e:
-            logger.error(f"Error analyzing stream: {str(e)}")
-            return None
+    @staticmethod
+    def calculate_bitrate(stream_info: dict):
+        channels = stream_info.get("channels", 2)
+        return int(channels) * 64
 
     def test_stream_needs_processing(self, stream_info: dict):
-        """Override base method to implement our processing logic"""
+        """
+        Test if the stream needs to be processed.
+
+        A stream needs processing if:
+        - Its sample rate is higher than target_sample_rate (regardless of codec)
+        - OR if force_processing is enabled and it's not already encoded with libfdk_aac
+        """
+        force_processing = self.settings.get_setting("force_processing")
+        target_sample_rate = int(self.settings.get_setting("target_sample_rate"))
+
+        # Get current sample rate
         try:
-            if stream_info.get("codec_type") != "audio":
-                return False
-
-            analysis = self.analyze_stream(stream_info)
-            if not analysis:
-                return False
-
-            return analysis["needs_processing"] or analysis["needs_stereo"]
-
-        except Exception as e:
-            logger.error(f"Error in test_stream_needs_processing: {str(e)}")
+            current_sample_rate = int(stream_info.get("sample_rate", 0))
+        except (TypeError, ValueError):
+            logger.warning("Unable to determine sample rate for stream")
             return False
 
+        # Check if sample rate exceeds target
+        needs_sample_rate_conversion = current_sample_rate > target_sample_rate
+
+        # Log the stream details
+        logger.debug(f"Stream codec: {stream_info.get('codec_name')}")
+        logger.debug(
+            f"Stream sample rate: {current_sample_rate}Hz, Target: {target_sample_rate}Hz"
+        )
+
+        if needs_sample_rate_conversion:
+            logger.debug("Stream requires sample rate conversion regardless of codec")
+            return True
+
+        # If we don't need sample rate conversion, check if we should force process
+        if force_processing:
+            # Check if already encoded with libfdk_aac
+            is_libfdk = (
+                "tags" in stream_info
+                and "ENCODER" in stream_info.get("tags")
+                and self.encoder in stream_info.get("tags")["ENCODER"]
+            )
+            return not is_libfdk
+
+        return False
+
     def custom_stream_mapping(self, stream_info: dict, stream_id: int):
-        """Override base method to implement our custom mapping"""
-        try:
-            analysis = self.analyze_stream(stream_info)
-            if not analysis:
-                return None
+        """
+        Generate stream mapping including sample rate conversion if needed
+        """
+        stream_encoding = ["-c:a:{}".format(stream_id), self.encoder]
 
-            args = {
-                "stream_mapping": ["-map", f"0:a:{stream_id}"],
-                "stream_encoding": [],
-            }
+        # Check if sample rate conversion is needed
+        current_sample_rate = int(stream_info.get("sample_rate", 0))
+        target_sample_rate = int(self.settings.get_setting("target_sample_rate"))
+        current_codec = stream_info.get("codec_name", "unknown")
 
-            # Handle main stream
-            if analysis["needs_processing"]:
-                args["stream_encoding"] = [
-                    f"-c:a:{self.stream_count}",
-                    analysis["encoder"],
-                    f"-ar:a:{self.stream_count}",
-                    str(self.target_sample_rate),
+        if current_sample_rate > target_sample_rate:
+            # Add sample rate conversion
+            stream_encoding += ["-ar:a:{}".format(stream_id), str(target_sample_rate)]
+            logger.debug(
+                f"Converting {current_codec} stream from {current_sample_rate}Hz to {target_sample_rate}Hz"
+            )
+        else:
+            logger.debug(
+                f"Processing {current_codec} stream due to force_processing (sample rate already {current_sample_rate}Hz)"
+            )
+
+        if self.settings.get_setting("advanced"):
+            stream_encoding += self.settings.get_setting("custom_options").split()
+        else:
+            # Automatically detect bitrate for this stream
+            if stream_info.get("channels"):
+                # Use 64K for the bitrate per channel
+                calculated_bitrate = self.calculate_bitrate(stream_info)
+                channels = int(stream_info.get("channels"))
+                if channels > 6:
+                    channels = 6
+                stream_encoding += [
+                    "-ac:a:{}".format(stream_id),
+                    "{}".format(channels),
+                    "-b:a:{}".format(stream_id),
+                    "{}k".format(calculated_bitrate),
                 ]
 
-                # Add normalization filter
-                if analysis["info"]["channels"] > 2:
-                    norm = self.settings.settings["surround_normalize"]
-                else:
-                    norm = self.settings.settings["stereo_normalize"]
-
-                args["stream_encoding"].extend(
-                    [
-                        f"-filter:a:{self.stream_count}",
-                        f'loudnorm=I={norm["I"]}:LRA={norm["LRA"]}:TP={norm["TP"]}',
-                    ]
-                )
-            else:
-                args["stream_encoding"] = [f"-c:a:{self.stream_count}", "copy"]
-
-            # Add metadata
-            language = analysis["info"]["language"]
-            if language != "und":
-                args["stream_encoding"].extend(
-                    [f"-metadata:s:a:{self.stream_count}", f"language={language}"]
-                )
-
-            title = analysis["info"]["title"]
-            if title:
-                args["stream_encoding"].extend(
-                    [f"-metadata:s:a:{self.stream_count}", f"title={title}"]
-                )
-
-            # Increment stream counter
-            self.stream_count += 1
-
-            # Add stereo version if needed
-            if analysis["needs_stereo"]:
-                stereo_args = {
-                    "stream_mapping": ["-map", f"0:a:{stream_id}"],
-                    "stream_encoding": [
-                        f"-c:a:{self.stream_count}",
-                        "libfdk_aac",
-                        f"-ac:a:{self.stream_count}",
-                        "2",
-                        f"-ar:a:{self.stream_count}",
-                        str(self.target_sample_rate),
-                        f"-filter:a:{self.stream_count}",
-                        f'loudnorm=I={self.settings.settings["stereo_normalize"]["I"]}:'
-                        f'LRA={self.settings.settings["stereo_normalize"]["LRA"]}:'
-                        f'TP={self.settings.settings["stereo_normalize"]["TP"]}',
-                        f"-metadata:s:a:{self.stream_count}",
-                        f"language={language}",
-                        f"-metadata:s:a:{self.stream_count}",
-                        "title=Stereo",
-                    ],
-                }
-
-                # Merge stereo args with main args
-                args["stream_mapping"].extend(stereo_args["stream_mapping"])
-                args["stream_encoding"].extend(stereo_args["stream_encoding"])
-                self.stream_count += 1
-
-            return args
-
-        except Exception as e:
-            logger.error(f"Error in custom_stream_mapping: {str(e)}")
-            return None
+        return {
+            "stream_mapping": ["-map", "0:a:{}".format(stream_id)],
+            "stream_encoding": stream_encoding,
+        }
 
 
 def on_library_management_file_test(data):
-    """Runner function - enables additional actions during the library management file tests."""
+    """
+    Runner function - enables additional actions during the library management file tests.
+
+    The 'data' object argument includes:
+        path                            - String containing the full path to the file being tested.
+        issues                          - List of currently found issues for not processing the file.
+        add_file_to_pending_tasks       - Boolean, is the file currently marked to be added to the queue for processing.
+
+    :param data:
+    :return:
+    """
+    # Get the path to the file
     abspath = data.get("path")
-    logger.info(f"\nTesting file: {abspath}")
 
-    try:
-        probe = Probe(logger, allowed_mimetypes=["video"])
-        if not probe.file(abspath):
-            return data
+    # Get file probe
+    probe = Probe(logger, allowed_mimetypes=["audio", "video"])
+    if not probe.file(abspath):
+        # File probe failed, skip the rest of this test
+        return data
 
+    # Configure settings object (maintain compatibility with v1 plugins)
+    if data.get("library_id"):
         settings = Settings(library_id=data.get("library_id"))
+    else:
+        settings = Settings()
 
-        mapper = PluginStreamMapper()
-        mapper.set_settings(settings)
-        mapper.set_probe(probe)
+    # Get stream mapper
+    mapper = PluginStreamMapper()
+    mapper.set_default_values(settings, abspath, probe)
 
-        if mapper.streams_need_processing():
-            data["add_file_to_pending_tasks"] = True
-            logger.info("File requires audio processing")
-
-    except Exception as e:
-        logger.error(f"Error testing file: {str(e)}")
-        logger.error(traceback.format_exc())
+    if mapper.streams_need_processing():
+        # Mark this file to be added to the pending tasks
+        data["add_file_to_pending_tasks"] = True
+        logger.debug(
+            "File '{}' needs processing - Found streams with sample rate > {}Hz".format(
+                abspath, settings.get_setting("target_sample_rate")
+            )
+        )
+    else:
+        logger.debug(
+            "File '{}' does not need processing - All streams at or below {}Hz".format(
+                abspath, settings.get_setting("target_sample_rate")
+            )
+        )
 
     return data
 
 
 def on_worker_process(data):
-    """Runner function - enables additional configured processing jobs during the worker stages of a task."""
-    # Default to no FFMPEG command required
+    """
+    Runner function - enables additional configured processing jobs during the worker stages of a task.
+
+    The 'data' object argument includes:
+        exec_command            - A command that Unmanic should execute. Can be empty.
+        command_progress_parser - A function that Unmanic can use to parse the STDOUT of the command to collect progress stats. Can be empty.
+        file_in                - The source file to be processed by the command.
+        file_out                - The destination that the command should output (may be the same as the file_in if necessary).
+        original_file_path      - The absolute path to the original file.
+        repeat                  - Boolean, should this runner be executed again once completed with the same variables.
+
+    :param data:
+    :return:
+    """
+    # Default to no FFMPEG command required. This prevents the FFMPEG command from running if it is not required
     data["exec_command"] = []
     data["repeat"] = False
 
+    # Get the path to the file
     abspath = data.get("file_in")
-    logger.info(f"\nProcessing file: {abspath}")
 
-    try:
-        probe = Probe(logger, allowed_mimetypes=["video"])
-        if not probe.file(abspath):
-            return data
-
-        settings = Settings(library_id=data.get("library_id"))
-
-        mapper = PluginStreamMapper()
-        mapper.set_settings(settings)
-        mapper.set_probe(probe)
-        mapper.set_input_file(abspath)
-        mapper.set_output_file(data.get("file_out"))
-
-        if mapper.streams_need_processing():
-            ffmpeg_args = mapper.get_ffmpeg_args()
-            if ffmpeg_args:
-                data["exec_command"] = ["ffmpeg"] + ffmpeg_args
-                logger.info("FFmpeg command:\n" + " ".join(data["exec_command"]))
-
-                parser = Parser(logger)
-                parser.set_probe(probe)
-                data["command_progress_parser"] = parser.parse_progress
-
-    except Exception as e:
-        logger.error(f"Error processing file: {str(e)}")
-        logger.error(traceback.format_exc())
-
-    return data
-
-
-def on_postprocessor_task_results(data):
-    """Runner function - provides a means for additional postprocessor functions based on the task success."""
-    if not data.get("task_processing_success"):
+    # Get file probe
+    probe = Probe(logger, allowed_mimetypes=["audio", "video"])
+    if not probe.file(abspath):
+        # File probe failed, skip the rest of this test
         return data
 
-    try:
-        for destination_file in data.get("destination_files", []):
-            logger.info(f"\nVerifying processing results for: {destination_file}")
+    # Configure settings object (maintain compatibility with v1 plugins)
+    settings = Settings(library_id=data.get("library_id"))
 
-            probe = Probe(logger, allowed_mimetypes=["video"])
-            if probe.file(destination_file):
-                audio_streams = [
-                    s
-                    for s in probe.get_probe()["streams"]
-                    if s.get("codec_type") == "audio"
-                ]
+    # Get stream mapper
+    mapper = PluginStreamMapper()
+    mapper.set_default_values(settings, abspath, probe)
 
-                # Store processing info
-                info = {
-                    "version": "1.0",
-                    "processed_date": datetime.now().isoformat(),
-                    "audio_streams": len(audio_streams),
-                    "stream_details": [
-                        {
-                            "codec": s.get("codec_name"),
-                            "channels": s.get("channels"),
-                            "sample_rate": s.get("sample_rate"),
-                            "language": s.get("tags", {}).get("language"),
-                            "title": s.get("tags", {}).get("title"),
-                        }
-                        for s in audio_streams
-                    ],
-                }
+    if mapper.streams_need_processing():
+        # Set the input file
+        mapper.set_input_file(abspath)
 
-                directory_info = UnmanicDirectoryInfo(os.path.dirname(destination_file))
-                directory_info.set(
-                    "seb_custom", os.path.basename(destination_file), info
-                )
-                directory_info.save()
+        # Set the output file
+        mapper.set_output_file(data.get("file_out"))
 
-    except Exception as e:
-        logger.error(f"Error in post-processing: {str(e)}")
-        logger.error(traceback.format_exc())
+        # Get generated ffmpeg args
+        ffmpeg_args = mapper.get_ffmpeg_args()
+
+        # Apply ffmpeg args to command
+        data["exec_command"] = ["ffmpeg"]
+        data["exec_command"] += ffmpeg_args
+
+        # Set the parser
+        parser = Parser(logger)
+        parser.set_probe(probe)
+        data["command_progress_parser"] = parser.parse_progress
 
     return data
