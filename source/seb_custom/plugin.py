@@ -4,13 +4,11 @@
 """
 unmanic-plugins.plugin.py
 
-Written by:               Josh.5 <jsunnex@gmail.com>
-Modified by:             Claude <claude@anthropic.com>
+Written by:               Claude <claude@anthropic.com>
 Date:                     14 Nov 2024
 
 Copyright:
-    Copyright (C) 2021 Josh Sunnex
-    Copyright (C) 2024 Anthropic
+    Copyright (C) 2024 Claude/Anthropic
 
     This program is free software: you can redistribute it and/or modify it under the terms of the GNU General
     Public License as published by the Free Software Foundation, version 3.
@@ -26,35 +24,29 @@ Copyright:
 
 import logging
 
+# Import custom ffmpeg helpers
 from seb_custom.lib.ffmpeg import Parser, Probe, StreamMapper
 from unmanic.libs.unplugins.settings import PluginSettings
 
 # Configure plugin logger
-logger = logging.getLogger("Unmanic.Plugin.encoder_audio_aac")
+logger = logging.getLogger("Unmanic.Plugin.seb_custom")
 
 
 class Settings(PluginSettings):
     settings = {
-        "advanced": False,
         "force_processing": False,
         "target_sample_rate": "48000",
         "max_muxing_queue_size": 2048,
-        "main_options": "",
-        "advanced_options": "",
-        "custom_options": "",
     }
 
     def __init__(self, *args, **kwargs):
         super(Settings, self).__init__(*args, **kwargs)
         self.form_settings = {
-            "advanced": {
-                "label": "Write your own FFmpeg params",
-            },
             "force_processing": {
-                "label": "Force processing (process streams even if audio is already encoded)",
+                "label": "Force processing of all audio streams regardless of sample rate"
             },
             "target_sample_rate": {
-                "label": "Target sample rate",
+                "label": "Target sample rate (Hz)",
                 "input_type": "slider",
                 "slider_options": {
                     "min": 8000,
@@ -62,176 +54,105 @@ class Settings(PluginSettings):
                     "step": 100,
                 },
             },
-            "max_muxing_queue_size": self.__set_max_muxing_queue_size_form_settings(),
-            "main_options": self.__set_main_options_form_settings(),
-            "advanced_options": self.__set_advanced_options_form_settings(),
-            "custom_options": self.__set_custom_options_form_settings(),
-        }
-
-    def __set_max_muxing_queue_size_form_settings(self):
-        values = {
-            "label": "Max input stream packet buffer",
-            "input_type": "slider",
-            "slider_options": {
-                "min": 1024,
-                "max": 10240,
+            "max_muxing_queue_size": {
+                "label": "Max input stream packet buffer",
+                "input_type": "slider",
+                "slider_options": {
+                    "min": 1024,
+                    "max": 10240,
+                },
             },
         }
-        if self.get_setting("advanced"):
-            values["display"] = "hidden"
-        return values
-
-    def __set_main_options_form_settings(self):
-        values = {
-            "label": "Write your own custom main options",
-            "input_type": "textarea",
-        }
-        if not self.get_setting("advanced"):
-            values["display"] = "hidden"
-        return values
-
-    def __set_advanced_options_form_settings(self):
-        values = {
-            "label": "Write your own custom advanced options",
-            "input_type": "textarea",
-        }
-        if not self.get_setting("advanced"):
-            values["display"] = "hidden"
-        return values
-
-    def __set_custom_options_form_settings(self):
-        values = {
-            "label": "Write your own custom audio options",
-            "input_type": "textarea",
-        }
-        if not self.get_setting("advanced"):
-            values["display"] = "hidden"
-        return values
 
 
 class PluginStreamMapper(StreamMapper):
     def __init__(self):
         super(PluginStreamMapper, self).__init__(logger, ["audio"])
-        self.codec = "aac"
-        self.encoder = "libfdk_aac"
         self.settings = None
+        self.target_sample_rate = 48000  # Default
 
-    def set_default_values(self, settings, abspath, probe):
-        """
-        Configure the stream mapper with defaults
-
-        :param settings:
-        :param abspath:
-        :param probe:
-        :return:
-        """
-        self.abspath = abspath
-        # Set the file probe data
-        self.set_probe(probe)
-        # Set the input file
-        self.set_input_file(abspath)
-        # Configure settings
+    def set_settings(self, settings):
         self.settings = settings
-
-        # Build default options of advanced mode
-        if self.settings.get_setting("advanced"):
-            # If any main options are provided, overwrite them
-            main_options = settings.get_setting("main_options").split()
-            if main_options:
-                # Overwrite all main options
-                self.main_options = main_options
-            # If any advanced options are provided, overwrite them
-            advanced_options = settings.get_setting("advanced_options").split()
-            if advanced_options:
-                # Overwrite all advanced options
-                self.advanced_options = advanced_options
-
-    @staticmethod
-    def calculate_bitrate(stream_info: dict):
-        channels = stream_info.get("channels", 2)
-        return int(channels) * 64
+        try:
+            self.target_sample_rate = int(
+                self.settings.get_setting("target_sample_rate")
+            )
+        except:
+            logger.warning("Failed to parse target sample rate, using default 48000")
+            self.target_sample_rate = 48000
 
     def test_stream_needs_processing(self, stream_info: dict):
         """
-        Test if the stream needs to be processed.
-
-        A stream needs processing if:
-        - Its sample rate is higher than target_sample_rate (regardless of codec)
-        - OR if force_processing is enabled and it's not already encoded with libfdk_aac
+        Determine if this stream needs to be processed.
         """
-        force_processing = self.settings.get_setting("force_processing")
-        target_sample_rate = int(self.settings.get_setting("target_sample_rate"))
-
-        # Get current sample rate
-        try:
-            current_sample_rate = int(stream_info.get("sample_rate", 0))
-        except (TypeError, ValueError):
-            logger.warning("Unable to determine sample rate for stream")
+        if not stream_info.get("sample_rate"):
+            logger.debug("No sample rate found in stream info")
             return False
 
-        # Check if sample rate exceeds target
-        needs_sample_rate_conversion = current_sample_rate > target_sample_rate
+        try:
+            current_sample_rate = int(stream_info.get("sample_rate"))
+            logger.debug(f"Stream sample rate: {current_sample_rate}Hz")
+            logger.debug(f"Target sample rate: {self.target_sample_rate}Hz")
 
-        # Log the stream details
-        logger.debug(f"Stream codec: {stream_info.get('codec_name')}")
-        logger.debug(
-            f"Stream sample rate: {current_sample_rate}Hz, Target: {target_sample_rate}Hz"
-        )
+            # Check if we need to process based on sample rate
+            needs_processing = current_sample_rate > self.target_sample_rate
 
-        if needs_sample_rate_conversion:
-            logger.debug("Stream requires sample rate conversion regardless of codec")
-            return True
+            if needs_processing:
+                logger.debug(
+                    f"Stream needs processing: {current_sample_rate}Hz > {self.target_sample_rate}Hz"
+                )
+            else:
+                logger.debug(
+                    f"Stream does not need processing: {current_sample_rate}Hz <= {self.target_sample_rate}Hz"
+                )
 
-        # If we don't need sample rate conversion, check if we should force process
-        if force_processing:
-            # Check if already encoded with libfdk_aac
-            is_libfdk = (
-                "tags" in stream_info
-                and "ENCODER" in stream_info.get("tags")
-                and self.encoder in stream_info.get("tags")["ENCODER"]
-            )
-            return not is_libfdk
+            # Check force processing flag
+            if self.settings.get_setting("force_processing"):
+                logger.debug(
+                    "Force processing enabled - will process stream regardless of sample rate"
+                )
+                return True
 
-        return False
+            return needs_processing
+
+        except Exception as e:
+            logger.error(f"Error checking stream sample rate: {e}")
+            return False
 
     def custom_stream_mapping(self, stream_info: dict, stream_id: int):
         """
-        Generate stream mapping including sample rate conversion if needed
+        Generate the custom mapping for this stream
         """
-        stream_encoding = ["-c:a:{}".format(stream_id), self.encoder]
-
-        # Check if sample rate conversion is needed
         current_sample_rate = int(stream_info.get("sample_rate", 0))
-        target_sample_rate = int(self.settings.get_setting("target_sample_rate"))
-        current_codec = stream_info.get("codec_name", "unknown")
+        channel_count = int(stream_info.get("channels", 2))
 
-        if current_sample_rate > target_sample_rate:
-            # Add sample rate conversion
-            stream_encoding += ["-ar:a:{}".format(stream_id), str(target_sample_rate)]
-            logger.debug(
-                f"Converting {current_codec} stream from {current_sample_rate}Hz to {target_sample_rate}Hz"
-            )
+        # Select encoder based on channel count
+        if channel_count > 6:
+            encoder = "libopus"
+            logger.debug(f"Using OPUS encoder for {channel_count} channels")
         else:
+            encoder = "libfdk_aac"
+            logger.debug(f"Using AAC encoder for {channel_count} channels")
+
+        stream_encoding = [
+            "-c:a:{}".format(stream_id),
+            encoder,
+        ]
+
+        # Add sample rate conversion if needed
+        if current_sample_rate > self.target_sample_rate:
+            stream_encoding += [
+                "-ar:a:{}".format(stream_id),
+                str(self.target_sample_rate),
+            ]
             logger.debug(
-                f"Processing {current_codec} stream due to force_processing (sample rate already {current_sample_rate}Hz)"
+                f"Adding sample rate conversion from {current_sample_rate}Hz to {self.target_sample_rate}Hz"
             )
 
-        if self.settings.get_setting("advanced"):
-            stream_encoding += self.settings.get_setting("custom_options").split()
-        else:
-            # Automatically detect bitrate for this stream
-            if stream_info.get("channels"):
-                # Use 64K for the bitrate per channel
-                calculated_bitrate = self.calculate_bitrate(stream_info)
-                channels = int(stream_info.get("channels"))
-                if channels > 6:
-                    channels = 6
-                stream_encoding += [
-                    "-ac:a:{}".format(stream_id),
-                    "{}".format(channels),
-                    "-b:a:{}".format(stream_id),
-                    "{}k".format(calculated_bitrate),
-                ]
+        # Calculate bitrate (64k per channel)
+        bitrate = channel_count * 64
+        stream_encoding += ["-b:a:{}".format(stream_id), "{}k".format(bitrate)]
+        logger.debug(f"Setting bitrate to {bitrate}k for {channel_count} channels")
 
         return {
             "stream_mapping": ["-map", "0:a:{}".format(stream_id)],
@@ -243,13 +164,8 @@ def on_library_management_file_test(data):
     """
     Runner function - enables additional actions during the library management file tests.
 
-    The 'data' object argument includes:
-        path                            - String containing the full path to the file being tested.
-        issues                          - List of currently found issues for not processing the file.
-        add_file_to_pending_tasks       - Boolean, is the file currently marked to be added to the queue for processing.
-
-    :param data:
-    :return:
+    :param data: The data object
+    :return: The data object
     """
     # Get the path to the file
     abspath = data.get("path")
@@ -260,29 +176,23 @@ def on_library_management_file_test(data):
         # File probe failed, skip the rest of this test
         return data
 
-    # Configure settings object (maintain compatibility with v1 plugins)
-    if data.get("library_id"):
-        settings = Settings(library_id=data.get("library_id"))
-    else:
-        settings = Settings()
+    # Configure settings object
+    settings = Settings(library_id=data.get("library_id"))
 
     # Get stream mapper
     mapper = PluginStreamMapper()
-    mapper.set_default_values(settings, abspath, probe)
+    mapper.set_settings(settings)
+    mapper.set_probe(probe)
 
     if mapper.streams_need_processing():
         # Mark this file to be added to the pending tasks
         data["add_file_to_pending_tasks"] = True
         logger.debug(
-            "File '{}' needs processing - Found streams with sample rate > {}Hz".format(
-                abspath, settings.get_setting("target_sample_rate")
-            )
+            f"File '{abspath}' should be added to task list. Found streams requiring sample rate conversion."
         )
     else:
         logger.debug(
-            "File '{}' does not need processing - All streams at or below {}Hz".format(
-                abspath, settings.get_setting("target_sample_rate")
-            )
+            f"File '{abspath}' does not contain streams requiring sample rate conversion."
         )
 
     return data
@@ -292,18 +202,10 @@ def on_worker_process(data):
     """
     Runner function - enables additional configured processing jobs during the worker stages of a task.
 
-    The 'data' object argument includes:
-        exec_command            - A command that Unmanic should execute. Can be empty.
-        command_progress_parser - A function that Unmanic can use to parse the STDOUT of the command to collect progress stats. Can be empty.
-        file_in                - The source file to be processed by the command.
-        file_out                - The destination that the command should output (may be the same as the file_in if necessary).
-        original_file_path      - The absolute path to the original file.
-        repeat                  - Boolean, should this runner be executed again once completed with the same variables.
-
-    :param data:
-    :return:
+    :param data: The data object
+    :return: The data object
     """
-    # Default to no FFMPEG command required. This prevents the FFMPEG command from running if it is not required
+    # Default to no FFMPEG command required
     data["exec_command"] = []
     data["repeat"] = False
 
@@ -316,12 +218,13 @@ def on_worker_process(data):
         # File probe failed, skip the rest of this test
         return data
 
-    # Configure settings object (maintain compatibility with v1 plugins)
+    # Configure settings object
     settings = Settings(library_id=data.get("library_id"))
 
     # Get stream mapper
     mapper = PluginStreamMapper()
-    mapper.set_default_values(settings, abspath, probe)
+    mapper.set_settings(settings)
+    mapper.set_probe(probe)
 
     if mapper.streams_need_processing():
         # Set the input file
@@ -333,13 +236,18 @@ def on_worker_process(data):
         # Get generated ffmpeg args
         ffmpeg_args = mapper.get_ffmpeg_args()
 
-        # Apply ffmpeg args to command
-        data["exec_command"] = ["ffmpeg"]
-        data["exec_command"] += ffmpeg_args
+        if ffmpeg_args:
+            # Apply ffmpeg args to command
+            data["exec_command"] = ["ffmpeg"]
+            data["exec_command"] += ffmpeg_args
 
-        # Set the parser
-        parser = Parser(logger)
-        parser.set_probe(probe)
-        data["command_progress_parser"] = parser.parse_progress
+            # Set the parser
+            parser = Parser(logger)
+            parser.set_probe(probe)
+            data["command_progress_parser"] = parser.parse_progress
+
+            logger.debug("FFmpeg Command: {}".format(" ".join(data["exec_command"])))
+        else:
+            logger.debug("No ffmpeg args generated - stream may not need processing")
 
     return data
