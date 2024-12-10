@@ -32,7 +32,7 @@ class PluginStreamMapper(StreamMapper):
     def __init__(self):
         super(PluginStreamMapper, self).__init__(logger, ["audio"])
         self.codec = "aac"
-        self.encoder = "libfdk_aac"
+        self.encoder = "libfdk_aac"  # Ensure FFmpeg is built with this encoder
         self.settings = None
 
     def set_default_values(self, settings, abspath, probe):
@@ -45,12 +45,11 @@ class PluginStreamMapper(StreamMapper):
 
     @staticmethod
     def calculate_bitrate(stream_info: dict):
-        # Default logic: 64 kb/s per channel
         channels = stream_info.get("channels", 2)
-        return int(channels) * 64
+        calculated_bitrate = int(channels) * 64
+        return calculated_bitrate
 
     def test_stream_needs_processing(self, stream_info: dict):
-        # Retrieve max_sample_rate from settings
         value = self.settings.get_setting("max_sample_rate")
         if value is None:
             value = 48000
@@ -65,7 +64,6 @@ class PluginStreamMapper(StreamMapper):
             f"channels={channels}, max_rate={max_rate}) for processing."
         )
 
-        # Re-encode if sample rate is above max_rate
         if sample_rate > max_rate:
             logger.debug(
                 f"Stream sample rate {sample_rate} > {max_rate} Hz. Will re-encode."
@@ -78,7 +76,7 @@ class PluginStreamMapper(StreamMapper):
         return False
 
     def custom_stream_mapping(self, stream_info: dict, stream_id: int):
-        # This is only called if test_stream_needs_processing() returned True
+        # Called only if test_stream_needs_processing returned True
         value = self.settings.get_setting("max_sample_rate")
         if value is None:
             value = 48000
@@ -89,12 +87,12 @@ class PluginStreamMapper(StreamMapper):
         if channels > 6:
             channels = 6
 
+        # Add aresample filter to force the sample rate change
         logger.debug(
             f"Custom mapping for stream {stream_id}: "
-            f"re-encode to {self.encoder}, {channels} channels, {calculated_bitrate}k, {max_rate} Hz."
+            f"re-encode to {self.encoder}, {channels} channels, {calculated_bitrate}k, {max_rate} Hz with aresample."
         )
 
-        # Build the encoding args for this stream
         stream_encoding = [
             "-c:a:{}".format(stream_id),
             self.encoder,
@@ -104,6 +102,9 @@ class PluginStreamMapper(StreamMapper):
             "{}k".format(calculated_bitrate),
             "-ar:a:{}".format(stream_id),
             str(max_rate),
+            # Use aresample filter to explicitly resample to max_rate
+            "-af:a:{}".format(stream_id),
+            f"aresample=resampler=soxr:osr={max_rate}:cutoff=0.990:dither_method=none",
         ]
 
         return {
@@ -121,7 +122,6 @@ def on_library_management_file_test(data):
         logger.warning(f"File probe failed for '{abspath}'. Skipping test.")
         return data
 
-    # Load settings for this library (or global if no library_id)
     settings = (
         Settings(library_id=data.get("library_id"))
         if data.get("library_id")
@@ -165,34 +165,25 @@ def on_worker_process(data):
         mapper.set_input_file(abspath)
         mapper.set_output_file(data.get("file_out"))
 
-        # Get the ffmpeg args from the mapper
         ffmpeg_args = mapper.get_ffmpeg_args()
 
-        # Insert `-strict -2` if needed to enable libfdk_aac
-        # and ensure a large muxing queue size like in the original code.
-        # The original code placed `-strict -2` and `-max_muxing_queue_size` before mapping.
-        # We'll do the same for consistency.
-
-        # Typically, StreamMapper already sets -max_muxing_queue_size (if it was included),
-        # but let's ensure it here if needed. The original code included it, so let's add it back.
-        # You can adjust this or remove if unnecessary.
-        if "-max_muxing_queue_size" not in ffmpeg_args:
-            ffmpeg_args.insert(0, "-max_muxing_queue_size")
-            ffmpeg_args.insert(1, "4096")
-
+        # Insert -strict -2 for libfdk_aac if needed
         if "-strict" not in ffmpeg_args:
             ffmpeg_args.insert(0, "-strict")
             ffmpeg_args.insert(1, "-2")
 
-        # Also include `-hide_banner -loglevel info` at the start if desired.
+        # Ensure a decent muxing queue size if needed
+        if "-max_muxing_queue_size" not in ffmpeg_args:
+            ffmpeg_args.insert(0, "-max_muxing_queue_size")
+            ffmpeg_args.insert(1, "4096")
+
+        # Add -hide_banner and -loglevel info for better logging
         if "-hide_banner" not in ffmpeg_args:
             ffmpeg_args.insert(0, "-loglevel")
             ffmpeg_args.insert(1, "info")
             ffmpeg_args.insert(0, "-hide_banner")
 
-        # Construct the final ffmpeg command
         data["exec_command"] = ["ffmpeg"] + ffmpeg_args
-
         logger.debug(f"FFmpeg command: {' '.join(data['exec_command'])}")
 
         parser = Parser(logger)
