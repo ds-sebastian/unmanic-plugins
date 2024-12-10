@@ -3,11 +3,11 @@
 
 import logging
 
-from encoder_audio_libfdk_aac.lib.ffmpeg import Parser, Probe, StreamMapper
+from seb_custom.lib.ffmpeg import Parser, Probe, StreamMapper
 from unmanic.libs.unplugins.settings import PluginSettings
 
 # Configure plugin logger
-logger = logging.getLogger("Unmanic.Plugin.encoder_audio_aac_with_setting")
+logger = logging.getLogger("Unmanic.Plugin.seb_custom")
 logger.setLevel(logging.DEBUG)  # Set to DEBUG level to capture all debug messages.
 
 
