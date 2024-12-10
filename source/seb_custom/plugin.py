@@ -6,7 +6,6 @@ import logging
 from seb_custom.lib.ffmpeg import Parser, Probe, StreamMapper
 from unmanic.libs.unplugins.settings import PluginSettings
 
-# Configure plugin logger
 logger = logging.getLogger("Unmanic.Plugin.seb_custom")
 logger.setLevel(logging.DEBUG)
 
@@ -32,7 +31,7 @@ class PluginStreamMapper(StreamMapper):
     def __init__(self):
         super(PluginStreamMapper, self).__init__(logger, ["audio"])
         self.codec = "aac"
-        self.encoder = "libfdk_aac"  # Ensure FFmpeg is built with this encoder
+        self.encoder = "libfdk_aac"
         self.settings = None
 
     def set_default_values(self, settings, abspath, probe):
@@ -46,8 +45,7 @@ class PluginStreamMapper(StreamMapper):
     @staticmethod
     def calculate_bitrate(stream_info: dict):
         channels = stream_info.get("channels", 2)
-        calculated_bitrate = int(channels) * 64
-        return calculated_bitrate
+        return int(channels) * 64
 
     def test_stream_needs_processing(self, stream_info: dict):
         value = self.settings.get_setting("max_sample_rate")
@@ -76,7 +74,6 @@ class PluginStreamMapper(StreamMapper):
         return False
 
     def custom_stream_mapping(self, stream_info: dict, stream_id: int):
-        # Called only if test_stream_needs_processing returned True
         value = self.settings.get_setting("max_sample_rate")
         if value is None:
             value = 48000
@@ -87,12 +84,12 @@ class PluginStreamMapper(StreamMapper):
         if channels > 6:
             channels = 6
 
-        # Add aresample filter to force the sample rate change
         logger.debug(
             f"Custom mapping for stream {stream_id}: "
             f"re-encode to {self.encoder}, {channels} channels, {calculated_bitrate}k, {max_rate} Hz with aresample."
         )
 
+        # Use only `-af "aresample=48000"` to ensure resampling
         stream_encoding = [
             "-c:a:{}".format(stream_id),
             self.encoder,
@@ -100,11 +97,9 @@ class PluginStreamMapper(StreamMapper):
             "{}".format(channels),
             "-b:a:{}".format(stream_id),
             "{}k".format(calculated_bitrate),
-            "-ar:a:{}".format(stream_id),
-            str(max_rate),
-            # Use aresample filter to explicitly resample to max_rate
-            "-af:a:{}".format(stream_id),
-            f"aresample=resampler=soxr:osr={max_rate}:cutoff=0.990:dither_method=none",
+            # Remove -ar since we'll rely on the filter to enforce sample rate
+            "-af",
+            "aresample={}".format(max_rate),
         ]
 
         return {
@@ -127,7 +122,6 @@ def on_library_management_file_test(data):
         if data.get("library_id")
         else Settings()
     )
-
     mapper = PluginStreamMapper()
     mapper.set_default_values(settings, abspath, probe)
 
@@ -155,7 +149,6 @@ def on_worker_process(data):
         return data
 
     settings = Settings(library_id=data.get("library_id"))
-
     mapper = PluginStreamMapper()
     mapper.set_default_values(settings, abspath, probe)
 
@@ -167,17 +160,17 @@ def on_worker_process(data):
 
         ffmpeg_args = mapper.get_ffmpeg_args()
 
-        # Insert -strict -2 for libfdk_aac if needed
+        # Insert -strict -2 for libfdk_aac
         if "-strict" not in ffmpeg_args:
             ffmpeg_args.insert(0, "-strict")
             ffmpeg_args.insert(1, "-2")
 
-        # Ensure a decent muxing queue size if needed
+        # Ensure a muxing queue size
         if "-max_muxing_queue_size" not in ffmpeg_args:
             ffmpeg_args.insert(0, "-max_muxing_queue_size")
             ffmpeg_args.insert(1, "4096")
 
-        # Add -hide_banner and -loglevel info for better logging
+        # Add -hide_banner and -loglevel info
         if "-hide_banner" not in ffmpeg_args:
             ffmpeg_args.insert(0, "-loglevel")
             ffmpeg_args.insert(1, "info")
