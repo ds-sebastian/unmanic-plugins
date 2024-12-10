@@ -8,7 +8,7 @@ from unmanic.libs.unplugins.settings import PluginSettings
 
 # Configure plugin logger
 logger = logging.getLogger("Unmanic.Plugin.seb_custom")
-logger.setLevel(logging.DEBUG)  # Set to DEBUG level to capture all debug messages.
+logger.setLevel(logging.DEBUG)
 
 
 class Settings(PluginSettings):
@@ -36,23 +36,22 @@ class PluginStreamMapper(StreamMapper):
         self.settings = None
 
     def set_default_values(self, settings, abspath, probe):
-        logger.info(f"Setting default values for file '{abspath}'")
+        logger.debug(f"Setting default values for file '{abspath}'")
         self.abspath = abspath
         self.set_probe(probe)
         self.set_input_file(abspath)
         self.settings = settings
-        logger.info("Default values set.")
+        logger.debug("Default values set.")
 
     @staticmethod
     def calculate_bitrate(stream_info: dict):
+        # Default logic: 64 kb/s per channel
         channels = stream_info.get("channels", 2)
-        calculated_bitrate = int(channels) * 64
-        return calculated_bitrate
+        return int(channels) * 64
 
     def test_stream_needs_processing(self, stream_info: dict):
-        # Retrieve the max_sample_rate setting without passing a default to get_setting()
+        # Retrieve max_sample_rate from settings
         value = self.settings.get_setting("max_sample_rate")
-        # If value is None or empty, revert to a default of 48000
         if value is None:
             value = 48000
         max_rate = int(value)
@@ -61,23 +60,25 @@ class PluginStreamMapper(StreamMapper):
         codec_name = stream_info.get("codec_name", "unknown")
         channels = stream_info.get("channels", "unknown")
 
-        logger.info(
+        logger.debug(
             f"Testing stream (codec={codec_name}, sample_rate={sample_rate}, "
             f"channels={channels}, max_rate={max_rate}) for processing."
         )
 
+        # Re-encode if sample rate is above max_rate
         if sample_rate > max_rate:
-            logger.info(
+            logger.debug(
                 f"Stream sample rate {sample_rate} > {max_rate} Hz. Will re-encode."
             )
             return True
 
-        logger.info(
+        logger.debug(
             f"Stream sample rate {sample_rate} <= {max_rate} Hz. No processing needed."
         )
         return False
 
     def custom_stream_mapping(self, stream_info: dict, stream_id: int):
+        # This is only called if test_stream_needs_processing() returned True
         value = self.settings.get_setting("max_sample_rate")
         if value is None:
             value = 48000
@@ -88,11 +89,12 @@ class PluginStreamMapper(StreamMapper):
         if channels > 6:
             channels = 6
 
-        logger.info(
+        logger.debug(
             f"Custom mapping for stream {stream_id}: "
             f"re-encode to {self.encoder}, {channels} channels, {calculated_bitrate}k, {max_rate} Hz."
         )
 
+        # Build the encoding args for this stream
         stream_encoding = [
             "-c:a:{}".format(stream_id),
             self.encoder,
@@ -112,35 +114,37 @@ class PluginStreamMapper(StreamMapper):
 
 def on_library_management_file_test(data):
     abspath = data.get("path")
-    logger.info(f"on_library_management_file_test called for '{abspath}'")
+    logger.debug(f"on_library_management_file_test called for '{abspath}'")
 
     probe = Probe(logger, allowed_mimetypes=["audio", "video"])
     if not probe.file(abspath):
         logger.warning(f"File probe failed for '{abspath}'. Skipping test.")
         return data
 
-    if data.get("library_id"):
-        settings = Settings(library_id=data.get("library_id"))
-    else:
-        settings = Settings()
+    # Load settings for this library (or global if no library_id)
+    settings = (
+        Settings(library_id=data.get("library_id"))
+        if data.get("library_id")
+        else Settings()
+    )
 
     mapper = PluginStreamMapper()
     mapper.set_default_values(settings, abspath, probe)
 
     if mapper.streams_need_processing():
         data["add_file_to_pending_tasks"] = True
-        logger.info(
+        logger.debug(
             f"File '{abspath}' requires processing and has been added to the pending tasks."
         )
     else:
-        logger.info(f"File '{abspath}' does not require processing.")
+        logger.debug(f"File '{abspath}' does not require processing.")
 
     return data
 
 
 def on_worker_process(data):
     abspath = data.get("file_in")
-    logger.info(f"on_worker_process called for '{abspath}'")
+    logger.debug(f"on_worker_process called for '{abspath}'")
 
     data["exec_command"] = []
     data["repeat"] = False
@@ -156,20 +160,46 @@ def on_worker_process(data):
     mapper.set_default_values(settings, abspath, probe)
 
     if mapper.streams_need_processing():
-        logger.info(f"Preparing ffmpeg command for '{abspath}'.")
+        logger.debug(f"Preparing ffmpeg command for '{abspath}'.")
 
         mapper.set_input_file(abspath)
         mapper.set_output_file(data.get("file_out"))
 
+        # Get the ffmpeg args from the mapper
         ffmpeg_args = mapper.get_ffmpeg_args()
+
+        # Insert `-strict -2` if needed to enable libfdk_aac
+        # and ensure a large muxing queue size like in the original code.
+        # The original code placed `-strict -2` and `-max_muxing_queue_size` before mapping.
+        # We'll do the same for consistency.
+
+        # Typically, StreamMapper already sets -max_muxing_queue_size (if it was included),
+        # but let's ensure it here if needed. The original code included it, so let's add it back.
+        # You can adjust this or remove if unnecessary.
+        if "-max_muxing_queue_size" not in ffmpeg_args:
+            ffmpeg_args.insert(0, "-max_muxing_queue_size")
+            ffmpeg_args.insert(1, "4096")
+
+        if "-strict" not in ffmpeg_args:
+            ffmpeg_args.insert(0, "-strict")
+            ffmpeg_args.insert(1, "-2")
+
+        # Also include `-hide_banner -loglevel info` at the start if desired.
+        if "-hide_banner" not in ffmpeg_args:
+            ffmpeg_args.insert(0, "-loglevel")
+            ffmpeg_args.insert(1, "info")
+            ffmpeg_args.insert(0, "-hide_banner")
+
+        # Construct the final ffmpeg command
         data["exec_command"] = ["ffmpeg"] + ffmpeg_args
-        logger.info(f"FFmpeg command: {' '.join(data['exec_command'])}")
+
+        logger.debug(f"FFmpeg command: {' '.join(data['exec_command'])}")
 
         parser = Parser(logger)
         parser.set_probe(probe)
         data["command_progress_parser"] = parser.parse_progress
     else:
-        logger.info(
+        logger.debug(
             f"No processing needed for '{abspath}'. No ffmpeg command will be run."
         )
 
