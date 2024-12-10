@@ -13,6 +13,10 @@ logger.setLevel(logging.DEBUG)
 class Settings(PluginSettings):
     settings = {
         "max_sample_rate": 48000,  # Default max supported sample rate
+        "I": "-24.0",  # Integrated loudness target
+        "LRA": "7.0",  # Loudness range
+        "TP": "-2.0",  # Max true peak
+        "enable_normalization": True,
     }
 
     def __init__(self, *args, **kwargs):
@@ -23,8 +27,67 @@ class Settings(PluginSettings):
                 "input_type": "slider",
                 "slider_options": {"min": 22050, "max": 192000, "step": 50},
                 "help_text": "Any audio stream above this sample rate will be re-encoded down to this rate.",
-            }
+            },
+            "I": {
+                "label": "Integrated loudness target (I)",
+                "input_type": "slider",
+                "slider_options": {
+                    "min": -70.0,
+                    "max": -5.0,
+                    "step": 0.1,
+                },
+                "help_text": "Integrated loudness target (in LUFS). Default: -24.0",
+            },
+            "LRA": {
+                "label": "Loudness range (LRA)",
+                "input_type": "slider",
+                "slider_options": {
+                    "min": 1.0,
+                    "max": 20.0,
+                    "step": 0.1,
+                },
+                "help_text": "Loudness range target. Default: 7.0",
+            },
+            "TP": {
+                "label": "Maximum true peak (TP)",
+                "input_type": "slider",
+                "slider_options": {
+                    "min": -9.0,
+                    "max": 0,
+                    "step": 0.1,
+                },
+                "help_text": "Maximum true peak level in dB. Default: -2.0",
+            },
+            "enable_normalization": {
+                "label": "Enable loudness normalization?",
+                "input_type": "boolean",
+                "help_text": "If enabled, apply loudnorm and aresample filters. If disabled, only resample if needed.",
+            },
         }
+
+
+def audio_filtergraph(settings):
+    """
+    Build the appropriate filtergraph string based on configured settings.
+    If normalization is disabled, we only use aresample.
+    If enabled, we apply loudnorm first, then aresample.
+    """
+    enable_normalization = settings.get_setting("enable_normalization")
+
+    value = settings.get_setting("max_sample_rate")
+    if value is None:
+        value = 48000
+    max_rate = int(value)
+
+    if not enable_normalization:
+        # Normalization disabled, just ensure sample rate is enforced
+        return f"aresample={max_rate}"
+
+    # Normalization enabled
+    i = settings.get_setting("I") or "-24.0"
+    lra = settings.get_setting("LRA") or "7.0"
+    tp = settings.get_setting("TP") or "-2.0"
+    return f"loudnorm=I={i}:LRA={lra}:TP={tp},aresample={max_rate}"
 
 
 class PluginStreamMapper(StreamMapper):
@@ -48,6 +111,7 @@ class PluginStreamMapper(StreamMapper):
         return int(channels) * 64
 
     def test_stream_needs_processing(self, stream_info: dict):
+        # Only re-encode if sample rate > max_sample_rate
         value = self.settings.get_setting("max_sample_rate")
         if value is None:
             value = 48000
@@ -74,22 +138,26 @@ class PluginStreamMapper(StreamMapper):
         return False
 
     def custom_stream_mapping(self, stream_info: dict, stream_id: int):
-        value = self.settings.get_setting("max_sample_rate")
-        if value is None:
-            value = 48000
-        max_rate = int(value)
-
+        # Only called if test_stream_needs_processing() returned True (> 48kHz)
         calculated_bitrate = self.calculate_bitrate(stream_info)
         channels = int(stream_info.get("channels", 2))
         if channels > 6:
             channels = 6
 
-        logger.debug(
-            f"Custom mapping for stream {stream_id}: "
-            f"re-encode to {self.encoder}, {channels} channels, {calculated_bitrate}k, {max_rate} Hz with aresample."
-        )
+        filter_str = audio_filtergraph(self.settings)
+        enable_normalization = self.settings.get_setting("enable_normalization")
 
-        # Use only `-af "aresample=48000"` to ensure resampling
+        if enable_normalization:
+            logger.debug(
+                f"Custom mapping for stream {stream_id}: re-encode to {self.encoder}, {channels} channels, "
+                f"{calculated_bitrate}k, with loudnorm and aresample."
+            )
+        else:
+            logger.debug(
+                f"Custom mapping for stream {stream_id}: re-encode to {self.encoder}, {channels} channels, "
+                f"{calculated_bitrate}k, with only aresample (normalization disabled)."
+            )
+
         stream_encoding = [
             "-c:a:{}".format(stream_id),
             self.encoder,
@@ -97,9 +165,8 @@ class PluginStreamMapper(StreamMapper):
             "{}".format(channels),
             "-b:a:{}".format(stream_id),
             "{}k".format(calculated_bitrate),
-            # Remove -ar since we'll rely on the filter to enforce sample rate
             "-af",
-            "aresample={}".format(max_rate),
+            filter_str,
         ]
 
         return {
@@ -160,12 +227,12 @@ def on_worker_process(data):
 
         ffmpeg_args = mapper.get_ffmpeg_args()
 
-        # Insert -strict -2 for libfdk_aac
+        # Insert -strict -2 for libfdk_aac if needed
         if "-strict" not in ffmpeg_args:
             ffmpeg_args.insert(0, "-strict")
             ffmpeg_args.insert(1, "-2")
 
-        # Ensure a muxing queue size
+        # Ensure a decent muxing queue size if needed
         if "-max_muxing_queue_size" not in ffmpeg_args:
             ffmpeg_args.insert(0, "-max_muxing_queue_size")
             ffmpeg_args.insert(1, "4096")
